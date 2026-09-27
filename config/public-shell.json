@@ -1,0 +1,48 @@
+{
+  "$schema": "public-shell.schema.json",
+  "schema_version": 1,
+  "profile": "public-shell",
+  "product": {
+    "source_build": "Source/MacPlusPlusCaelestiaShell/build.sh",
+    "production_flag": "MACPP_CAELESTIA_PRODUCTION=1",
+    "public_compile_define": "MACPP_PUBLIC_RELEASE",
+    "default_load": false
+  },
+  "launch_agents": {
+    "manifest": "config/launchagents/public-manifest.json",
+    "allowed_labels": ["org.macplusplus.shell"],
+    "run_at_load": false,
+    "keep_alive": false
+  },
+  "public_features": [
+    "shell-and-search",
+    "palette-and-wallpaper-controls",
+    "media-and-system-status",
+    "wifi-and-bluetooth-controls",
+    "setup-plan-manager",
+    "native-notification-settings-shortcut",
+    "one-shot-screen-capture",
+    "generic-audio-visualization",
+    "optional-yabai-window-integration"
+  ],
+  "optional_capabilities": {
+    "notifications": "Native macOS notifications only. No content capture, mirroring, or banner suppression.",
+    "wifi": "Nearby scans may require Location Services; saved credentials remain managed by macOS.",
+    "bluetooth": "macOS asks for Bluetooth access when the user first invokes device controls.",
+    "location": "Location-aware features stay off unless selected and are governed by macOS privacy controls.",
+    "screen_capture": "One-shot capture tools request access only when the user invokes them.",
+    "audio": "The generic local audio helper is separate and needs System Audio Recording consent when started.",
+    "accessibility": "Accessibility and Input Monitoring are only relevant for selected window or input actions.",
+    "yabai": "Standard yabai can run with SIP enabled; the scripting addition requires a manual RecoveryOS security decision."
+  },
+  "excluded_features": [
+    "notification-content-capture",
+    "clipboard-history",
+    "account-authorization",
+    "background-mode-automation",
+    "screen-time-history",
+    "private-runtime-telemetry",
+    "vendor-device-agents",
+    "external-project-checkouts"
+  ]
+}

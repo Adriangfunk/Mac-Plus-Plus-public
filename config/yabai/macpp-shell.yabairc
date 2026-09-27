@@ -1,0 +1,19 @@
+# Mac++ public yabai rules
+#
+# This file is optional and deliberately does not start Mac++, yabai, or skhd.
+# Source it from the user's ~/.yabairc after installing yabai:
+#
+#   source "${MACPP_ROOT:?Set MACPP_ROOT to the Mac++ checkout}/config/yabai/macpp-shell.yabairc"
+#
+# The Shell remains usable without yabai. These rules keep Mac++'s transient
+# surfaces out of normal tiling while allowing ordinary user windows to remain
+# managed by the user's own yabai configuration.
+
+if command -v yabai >/dev/null 2>&1; then
+  yabai -m rule --add app='^Mac\+\+ Shell$' manage=off layer=above sticky=on topmost=on 2>/dev/null || true
+  yabai -m rule --add app='^(MacPlusPlusCast|Search)$' manage=off layer=above sticky=on topmost=on 2>/dev/null || true
+  yabai -m rule --add app='^Mac\+\+ Startup Overlay$' manage=off layer=above sticky=on topmost=on 2>/dev/null || true
+  yabai -m rule --add app='^Mac\+\+ Wallpaper$' manage=off layer=below sticky=on 2>/dev/null || true
+else
+  printf '%s\n' 'Mac++ yabai rules skipped: yabai is not installed or not on PATH.' >&2
+fi

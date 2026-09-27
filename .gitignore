@@ -1,0 +1,28 @@
+# Local editor and operating-system files
+.DS_Store
+._*
+Icon?
+*~
+*.swp
+*.tmp
+*.tmp.*
+*.bak
+*.bak.*
+__pycache__/
+*.py[cod]
+
+# Build output
+.build/
+build/
+build-*/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.xcbkptlist
+*.app/
+*.appex/
+*.saver/
+*.dSYM/
+*.o
+*.pcm
+*.so

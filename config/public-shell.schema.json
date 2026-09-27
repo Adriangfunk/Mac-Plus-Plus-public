@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Adriangfunk/Mac-Plus-Plus-public/blob/main/config/public-shell.schema.json",
+  "title": "Mac++ public shell release profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schema_version",
+    "profile",
+    "product",
+    "launch_agents",
+    "public_features",
+    "optional_capabilities",
+    "excluded_features"
+  ],
+  "properties": {
+    "$schema": {"const": "public-shell.schema.json"},
+    "schema_version": {"const": 1},
+    "profile": {"const": "public-shell"},
+    "product": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_build", "production_flag", "public_compile_define", "default_load"],
+      "properties": {
+        "source_build": {"const": "Source/MacPlusPlusCaelestiaShell/build.sh"},
+        "production_flag": {"const": "MACPP_CAELESTIA_PRODUCTION=1"},
+        "public_compile_define": {"const": "MACPP_PUBLIC_RELEASE"},
+        "default_load": {"const": false}
+      }
+    },
+    "launch_agents": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifest", "allowed_labels", "run_at_load", "keep_alive"],
+      "properties": {
+        "manifest": {"const": "config/launchagents/public-manifest.json"},
+        "allowed_labels": {"const": ["org.macplusplus.shell"]},
+        "run_at_load": {"const": false},
+        "keep_alive": {"const": false}
+      }
+    },
+    "public_features": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "optional_capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "notifications",
+        "wifi",
+        "bluetooth",
+        "location",
+        "screen_capture",
+        "audio",
+        "accessibility",
+        "yabai"
+      ],
+      "properties": {
+        "notifications": {"type": "string", "minLength": 1},
+        "wifi": {"type": "string", "minLength": 1},
+        "bluetooth": {"type": "string", "minLength": 1},
+        "location": {"type": "string", "minLength": 1},
+        "screen_capture": {"type": "string", "minLength": 1},
+        "audio": {"type": "string", "minLength": 1},
+        "accessibility": {"type": "string", "minLength": 1},
+        "yabai": {"type": "string", "minLength": 1}
+      }
+    },
+    "excluded_features": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    }
+  }
+}

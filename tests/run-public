@@ -1,0 +1,38 @@
+#!/bin/zsh
+set -euo pipefail
+
+# Review-safe public profile checks. This suite never installs, opens, loads,
+# restarts, or kickstarts the Shell or any LaunchAgent.
+ROOT="${0:A:h:h}"
+
+for script in \
+  "$ROOT/Source/MacPlusPlusCaelestiaShell/build.sh" \
+  "$ROOT/Source/MacPlusPlusCast/build.sh" \
+  "$ROOT/apps/AudioCore/build-public-audio.sh" \
+  "$ROOT/apps/MacPlusPlusScreen/build.sh" \
+  "$ROOT/apps/MacPlusPlusScreen/build-color-picker.sh" \
+  "$ROOT/apps/MacPlusPlusScreen/build-freeze.sh" \
+  "$ROOT/apps/MacPlusPlusScreen/build-luminance.sh" \
+  "$ROOT/bin/macpp-public-shell-launch" \
+  "$ROOT/config/yabai/macpp-shell.yabairc" \
+  "$ROOT/tests/test-public-release-contract" \
+  "$ROOT/tests/test-public-setup-plan"; do
+  zsh -n "$script"
+done
+
+python3 - "$ROOT" <<'PY'
+import ast
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+for path in sorted(root.rglob("*.py")):
+    if any(part in {".git", "build", "__pycache__"} for part in path.parts):
+        continue
+    ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+print("Public Python syntax: PASS")
+PY
+
+"$ROOT/tests/test-public-release-contract"
+"$ROOT/tests/test-public-setup-plan"
+
+print -r -- "Mac++ public staged suite: PASS"

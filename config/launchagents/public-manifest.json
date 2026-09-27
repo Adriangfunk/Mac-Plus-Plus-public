@@ -1,0 +1,11 @@
+{
+  "org.macplusplus.shell": {
+    "args": ["{{MACPP_ROOT}}/bin/macpp-public-shell-launch"],
+    "keep_alive": false,
+    "run_at_load": false,
+    "process_type": "Interactive",
+    "throttle_interval": 2,
+    "stdout": "{{HOME}}/Library/Logs/macpp-shell.log",
+    "stderr": "{{HOME}}/Library/Logs/macpp-shell.err.log"
+  }
+}

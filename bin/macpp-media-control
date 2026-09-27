@@ -1,0 +1,66 @@
+#!/bin/zsh
+set -u
+
+action="${1:-playpause}"
+provider="${2:-active}"
+
+case "$action" in
+  prev) action="previous" ;;
+  toggle) action="playpause" ;;
+esac
+case "$action" in
+  playpause|previous|next|forward|backward|play|pause) ;;
+  *) print -u2 -- "unsupported media action"; exit 2 ;;
+esac
+case "$provider" in
+  active|system|spotify|safari|browser) ;;
+  *) print -u2 -- "unsupported media provider"; exit 2 ;;
+esac
+
+if [[ "$provider" == "spotify" ]]; then
+  case "$action" in
+    previous) command="previous track" ;;
+    next) command="next track" ;;
+    playpause) command="playpause" ;;
+    play) command="play" ;;
+    pause) command="pause" ;;
+    forward) command="set player position to (player position + 15)" ;;
+    backward) command="set player position to (my maxZero(player position - 15))" ;;
+  esac
+  if [[ "$action" == "backward" ]]; then
+    /usr/bin/osascript >/dev/null 2>&1 <<APPLESCRIPT
+on maxZero(value)
+  if value < 0 then return 0
+  return value
+end maxZero
+tell application "Spotify" to $command
+APPLESCRIPT
+  else
+    /usr/bin/osascript -e "tell application \"Spotify\" to $command" >/dev/null 2>&1
+  fi
+  exit $?
+fi
+
+# Use Now Playing when the user already has it. The public release does not
+# bundle or install third-party media utilities.
+if (( $+commands[nowplaying-cli] )); then
+  case "$action" in
+    previous) nowplaying-cli previous ;;
+    next) nowplaying-cli next ;;
+    playpause) nowplaying-cli togglePlayPause ;;
+    play) nowplaying-cli play ;;
+    pause) nowplaying-cli pause ;;
+    forward) nowplaying-cli next ;;
+    backward) nowplaying-cli previous ;;
+  esac
+  exit $?
+fi
+
+# Media-key fallback is only called by a user control. Shell installs no key
+# monitor and asks for no permission at launch.
+case "$action" in
+  previous|backward) key_code=98 ;;
+  next|forward) key_code=101 ;;
+  *) key_code=100 ;;
+esac
+/usr/bin/osascript -e "tell application \"System Events\" to key code $key_code" >/dev/null 2>&1

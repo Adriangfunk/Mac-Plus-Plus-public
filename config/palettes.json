@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "default": "midnight",
+  "dedicated": ["midnight", "white"],
+  "presets": {
+    "midnight": {
+      "frame": "080D19",
+      "panel": "02050B",
+      "text": "DDE9FF",
+      "accent": "6EA6FF",
+      "native_accent": 4,
+      "native_label": "Blue"
+    },
+    "darkSky": {
+      "frame": "132444",
+      "panel": "091426",
+      "text": "E3EEFF",
+      "accent": "83B8FF",
+      "native_accent": 4,
+      "native_label": "Blue"
+    },
+    "graphite": {
+      "frame": "292D35",
+      "panel": "14171C",
+      "text": "F0F2F5",
+      "accent": "AEB7C8",
+      "native_accent": -1,
+      "native_label": "Graphite"
+    },
+    "frost": {
+      "frame": "123747",
+      "panel": "071F29",
+      "text": "ECFBFF",
+      "accent": "9ADFFF",
+      "native_accent": 4,
+      "native_label": "Blue"
+    },
+    "ember": {
+      "frame": "3A1B1F",
+      "panel": "190B0E",
+      "text": "FFF0EC",
+      "accent": "FF927C",
+      "native_accent": 0,
+      "native_label": "Red"
+    },
+    "violet": {
+      "frame": "2C2044",
+      "panel": "120B20",
+      "text": "F5EEFF",
+      "accent": "B99BFF",
+      "native_accent": 5,
+      "native_label": "Purple"
+    },
+    "obsidian": {
+      "frame": "12161E",
+      "panel": "05070B",
+      "text": "EDF1F7",
+      "accent": "929FB3",
+      "native_accent": -1,
+      "native_label": "Graphite"
+    },
+    "white": {
+      "frame": "F2F3F5",
+      "panel": "FFFFFF",
+      "text": "1D1D1F",
+      "accent": "7899C8",
+      "native_accent": 4,
+      "native_label": "Blue"
+    },
+    "game": {
+      "frame": "3A0B12",
+      "panel": "160408",
+      "text": "FFF0EC",
+      "accent": "FF3C55",
+      "native_accent": 0,
+      "native_label": "Red"
+    }
+  }
+}

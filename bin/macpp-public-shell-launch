@@ -1,0 +1,7 @@
+#!/usr/bin/env zsh
+set -euo pipefail
+
+MACPP_ROOT="${MACPP_ROOT:-${0:A:h:h}}"
+SHELL_APP="$MACPP_ROOT/build/Mac++ Shell.app"
+
+exec /usr/bin/open "$SHELL_APP"

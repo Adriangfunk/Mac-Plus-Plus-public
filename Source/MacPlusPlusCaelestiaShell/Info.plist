@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleExecutable</key><string>Mac++ Caelestia Shell</string>
+  <key>CFBundleIdentifier</key><string>org.macplusplus.caelestia-shell</string>
+  <key>CFBundleName</key><string>Mac++ Caelestia Shell</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key><string>org.macplusplus.caelestia-shell.spotify</string>
+      <key>CFBundleURLSchemes</key>
+      <array><string>macpp-caelestia-shell</string></array>
+    </dict>
+  </array>
+  <key>CFBundleShortVersionString</key><string>1.0.0</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>LSMinimumSystemVersion</key><string>14.0</string>
+  <key>LSUIElement</key><true/>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSLocationWhenInUseUsageDescription</key><string>Mac++ Caelestia Shell uses your approximate location to show local weather and nearby network information.</string>
+  <key>NSBluetoothAlwaysUsageDescription</key><string>Mac++ Caelestia Shell uses Bluetooth access to show paired devices and connect or disconnect them from the sidebar.</string>
+</dict></plist>

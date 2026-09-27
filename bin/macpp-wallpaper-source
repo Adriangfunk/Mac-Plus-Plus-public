@@ -1,0 +1,840 @@
+#!/usr/bin/python3 -B
+"""Bounded Wallhaven search and managed MacPlusPlus wallpaper import."""
+
+from __future__ import annotations
+
+import argparse
+from email.message import Message
+import fcntl
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+import urllib.error
+import urllib.parse
+import urllib.request
+
+
+API_ROOT = "https://wallhaven.cc/api/v1"
+SEARCH_ENDPOINT = API_ROOT + "/search"
+DETAIL_ENDPOINT = API_ROOT + "/w/{identifier}"
+USER_AGENT = "MacPlusPlus/1.0 (local macOS wallpaper source browser)"
+MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+MAX_DOWNLOAD_BYTES = 80 * 1024 * 1024
+MAX_IMAGE_PIXELS = 100_000_000
+MIN_WIDTH = 3440
+MIN_HEIGHT = 1440
+MIN_RATIO = 1.8
+TARGET_CROP_ASPECT = 21.0 / 9.0
+ID_PATTERN = re.compile(r"^[a-z0-9]{6,12}$")
+ALLOWED_PAGE_HOSTS = {"wallhaven.cc", "www.wallhaven.cc"}
+ALLOWED_MEDIA_HOSTS = {"w.wallhaven.cc", "th.wallhaven.cc"}
+CONTENT_EXTENSIONS = {"image/jpeg": "jpg", "image/png": "png"}
+
+
+class SourceError(RuntimeError):
+    pass
+
+
+def clean_query(raw: str) -> str:
+    if any(ord(character) < 32 for character in raw):
+        raise SourceError("query contains control characters")
+    query = " ".join(raw.split())
+    encoded = query.encode("utf-8")
+    if len(encoded) > 160:
+        raise SourceError("query is longer than 160 UTF-8 bytes")
+    return query
+
+
+def require_https_url(raw: Any, allowed_hosts: set[str], context: str) -> str:
+    if not isinstance(raw, str):
+        raise SourceError("%s is not a URL" % context)
+    if len(raw.encode("utf-8")) > 4096:
+        raise SourceError("%s is longer than 4096 UTF-8 bytes" % context)
+    parsed = urllib.parse.urlsplit(raw)
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise SourceError("%s has an invalid port" % context) from error
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in allowed_hosts
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 443)
+    ):
+        raise SourceError("%s uses an untrusted URL" % context)
+    return raw
+
+
+class StrictRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow redirects only when the destination remains on the allowlist."""
+
+    def __init__(self, allowed_hosts: set[str]) -> None:
+        super().__init__()
+        self.allowed_hosts = allowed_hosts
+
+    def redirect_request(
+        self,
+        request: urllib.request.Request,
+        file_pointer: Any,
+        code: int,
+        message: str,
+        headers: Any,
+        new_url: str,
+    ) -> Optional[urllib.request.Request]:
+        target = urllib.parse.urljoin(request.full_url, new_url)
+        require_https_url(target, self.allowed_hosts, "redirect target")
+        return super().redirect_request(
+            request, file_pointer, code, message, headers, target
+        )
+
+
+def open_strict(
+    request: urllib.request.Request,
+    allowed_hosts: set[str],
+    timeout: float,
+) -> Any:
+    require_https_url(request.full_url, allowed_hosts, "request")
+    opener = urllib.request.build_opener(StrictRedirectHandler(allowed_hosts))
+    response = opener.open(request, timeout=timeout)
+    try:
+        require_https_url(response.geturl(), allowed_hosts, "final response")
+    except Exception:
+        response.close()
+        raise
+    return response
+
+
+class FixtureResponse:
+    """Small file-backed response used only by the offline contract test."""
+
+    def __init__(self, path: Path, content_type: str, final_url: str, length: str) -> None:
+        self._handle = path.open("rb")
+        self._final_url = final_url
+        self.headers = Message()
+        self.headers["Content-Type"] = content_type
+        self.headers["Content-Length"] = length
+
+    def read(self, amount: int = -1) -> bytes:
+        return self._handle.read(amount)
+
+    def close(self) -> None:
+        self._handle.close()
+
+    def geturl(self) -> str:
+        return self._final_url
+
+
+def open_media(request: urllib.request.Request) -> Any:
+    fixture = os.environ.get("MACPP_WALLPAPER_SOURCE_MEDIA_FIXTURE")
+    testing = os.environ.get("MACPP_WALLPAPER_SOURCE_TESTING") == "1"
+    if not testing:
+        return open_strict(request, ALLOWED_MEDIA_HOSTS, timeout=25)
+    if not fixture:
+        raise SourceError("testing import requires MACPP_WALLPAPER_SOURCE_MEDIA_FIXTURE")
+    path = Path(fixture)
+    try:
+        size = path.stat().st_size
+    except OSError as error:
+        raise SourceError("cannot read test media fixture: %s" % error) from error
+    content_type = os.environ.get("MACPP_WALLPAPER_SOURCE_MEDIA_TYPE", "image/png")
+    final_url = os.environ.get("MACPP_WALLPAPER_SOURCE_MEDIA_FINAL_URL", request.full_url)
+    require_https_url(final_url, ALLOWED_MEDIA_HOSTS, "fixture final response")
+    length = os.environ.get("MACPP_WALLPAPER_SOURCE_MEDIA_LENGTH", str(size))
+    try:
+        return FixtureResponse(path, content_type, final_url, length)
+    except OSError as error:
+        raise SourceError("cannot open test media fixture: %s" % error) from error
+
+
+def request_json(url: str) -> Dict[str, Any]:
+    fixture = os.environ.get("MACPP_WALLPAPER_SOURCE_FIXTURE")
+    if fixture and os.environ.get("MACPP_WALLPAPER_SOURCE_TESTING") == "1":
+        try:
+            payload = Path(fixture).read_bytes()
+        except OSError as error:
+            raise SourceError("cannot read test fixture: %s" % error) from error
+    else:
+        request = urllib.request.Request(
+            url,
+            headers={"Accept": "application/json", "User-Agent": USER_AGENT},
+            method="GET",
+        )
+        try:
+            with open_strict(request, ALLOWED_PAGE_HOSTS, timeout=12) as response:
+                payload = response.read(MAX_RESPONSE_BYTES + 1)
+        except (OSError, urllib.error.URLError, urllib.error.HTTPError) as error:
+            raise SourceError("Wallhaven request failed: %s" % error) from error
+    if len(payload) > MAX_RESPONSE_BYTES:
+        raise SourceError("Wallhaven response exceeds 4 MiB")
+    try:
+        document = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, TypeError) as error:
+        raise SourceError("Wallhaven returned malformed JSON") from error
+    if not isinstance(document, dict):
+        raise SourceError("Wallhaven response is not an object")
+    return document
+
+
+def api_key_parameters() -> Dict[str, str]:
+    key = os.environ.get("WALLHAVEN_API_KEY", "").strip()
+    if not key:
+        return {}
+    if not re.fullmatch(r"[A-Za-z0-9]{16,64}", key):
+        raise SourceError("WALLHAVEN_API_KEY has an invalid shape")
+    return {"apikey": key}
+
+
+def build_search_url(query: str, page: int) -> str:
+    parameters = {
+        "q": query,
+        "categories": "110",
+        "purity": "100",
+        "sorting": "relevance" if query else "toplist",
+        "order": "desc",
+        "topRange": "1M",
+        "atleast": "3440x1440",
+        "ratios": "21x9,32x9",
+        "page": str(page),
+        **api_key_parameters(),
+    }
+    return SEARCH_ENDPOINT + "?" + urllib.parse.urlencode(parameters)
+
+
+def normalized_result(raw: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return None
+    identifier = raw.get("id")
+    width = raw.get("dimension_x")
+    height = raw.get("dimension_y")
+    if (
+        not isinstance(identifier, str)
+        or not ID_PATTERN.fullmatch(identifier)
+        or not isinstance(width, int)
+        or isinstance(width, bool)
+        or not isinstance(height, int)
+        or isinstance(height, bool)
+        or width < MIN_WIDTH
+        or height < MIN_HEIGHT
+        or width / max(height, 1) < MIN_RATIO
+        or width * height > MAX_IMAGE_PIXELS
+    ):
+        return None
+    try:
+        page_url = require_https_url(raw.get("url"), ALLOWED_PAGE_HOSTS, "result page")
+        media_url = require_https_url(raw.get("path"), ALLOWED_MEDIA_HOSTS, "result media")
+        thumbnails = raw.get("thumbs")
+        if not isinstance(thumbnails, dict):
+            return None
+        thumb_small = require_https_url(thumbnails.get("small"), ALLOWED_MEDIA_HOSTS, "small thumbnail")
+        thumb_large = require_https_url(
+            thumbnails.get("large") or thumbnails.get("original"),
+            ALLOWED_MEDIA_HOSTS,
+            "large thumbnail",
+        )
+    except SourceError:
+        return None
+    file_type = raw.get("file_type")
+    file_size = raw.get("file_size")
+    if file_type not in CONTENT_EXTENSIONS:
+        return None
+    if not isinstance(file_size, int) or isinstance(file_size, bool) or not 0 < file_size <= MAX_DOWNLOAD_BYTES:
+        return None
+    return {
+        "id": identifier,
+        "page_url": page_url,
+        "resolution": "%dx%d" % (width, height),
+        "width": width,
+        "height": height,
+        "ratio": round(width / height, 4),
+        "file_size": file_size,
+        "file_type": file_type,
+        "media_url": media_url,
+        "thumbnail_small": thumb_small,
+        "thumbnail_large": thumb_large,
+    }
+
+
+def normalize_search(document: Dict[str, Any], limit: int) -> Dict[str, Any]:
+    data = document.get("data")
+    meta = document.get("meta")
+    if not isinstance(data, list) or not isinstance(meta, dict):
+        raise SourceError("Wallhaven search response is missing data/meta")
+    results: List[Dict[str, Any]] = []
+    for raw in data:
+        result = normalized_result(raw)
+        if result is not None:
+            results.append(result)
+        if len(results) >= limit:
+            break
+    current_page = meta.get("current_page", 1)
+    last_page = meta.get("last_page", current_page)
+    total = meta.get("total", len(results))
+    if (
+        not isinstance(current_page, int)
+        or isinstance(current_page, bool)
+        or not isinstance(last_page, int)
+        or isinstance(last_page, bool)
+        or not isinstance(total, int)
+        or isinstance(total, bool)
+    ):
+        raise SourceError("Wallhaven pagination metadata is malformed")
+    normalized_page = min(100, max(1, current_page))
+    normalized_last_page = min(100, max(normalized_page, last_page))
+    return {
+        "schema_version": 1,
+        "provider": "wallhaven",
+        "filters": {
+            "purity": "sfw",
+            "categories": ["general", "anime"],
+            "minimum_resolution": "3440x1440",
+            "ratios": ["21:9", "32:9"],
+        },
+        "page": normalized_page,
+        "last_page": normalized_last_page,
+        "total": max(0, total),
+        "results": results,
+    }
+
+
+def extract_identifier(raw: str) -> str:
+    candidate = raw.strip().lower()
+    if ID_PATTERN.fullmatch(candidate):
+        return candidate
+    try:
+        trusted = require_https_url(
+            candidate,
+            ALLOWED_PAGE_HOSTS | ALLOWED_MEDIA_HOSTS,
+            "Wallhaven source",
+        )
+        parsed = urllib.parse.urlsplit(trusted)
+    except (SourceError, ValueError) as error:
+        raise SourceError("invalid Wallhaven identifier or URL") from error
+    match = re.search(r"(?:/w/|wallhaven-)([a-z0-9]{6,12})(?:\.|/|$)", parsed.path)
+    if match is None:
+        raise SourceError("could not extract a Wallhaven identifier")
+    return match.group(1)
+
+
+def detail_for_identifier(identifier: str) -> Dict[str, Any]:
+    parameters = api_key_parameters()
+    url = DETAIL_ENDPOINT.format(identifier=identifier)
+    if parameters:
+        url += "?" + urllib.parse.urlencode(parameters)
+    document = request_json(url)
+    result = normalized_result(document.get("data"))
+    if result is None or result["id"] != identifier:
+        raise SourceError("Wallhaven detail response is not an eligible ultrawide image")
+    return result
+
+
+def managed_folder() -> Path:
+    return Path.home() / "Library/Application Support/MacPlusPlus/Wallpapers"
+
+
+def verify_image(
+    path: Path,
+    expected_type: Optional[str] = None,
+    expected_size: Optional[Tuple[int, int]] = None,
+) -> Tuple[int, int]:
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(16)
+    except OSError as error:
+        raise SourceError("cannot read downloaded image: %s" % error) from error
+    actual_type = (
+        "image/jpeg" if header.startswith(b"\xff\xd8\xff")
+        else "image/png" if header.startswith(b"\x89PNG\r\n\x1a\n")
+        else ""
+    )
+    if not actual_type or (expected_type is not None and actual_type != expected_type):
+        raise SourceError("downloaded bytes do not match the declared JPEG/PNG type")
+    try:
+        result = subprocess.run(
+            ["/usr/bin/sips", "-g", "pixelWidth", "-g", "pixelHeight", str(path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise SourceError("downloaded image inspection failed: %s" % error) from error
+    if result.returncode:
+        raise SourceError("downloaded file is not a decodable image")
+    width_match = re.search(r"pixelWidth:\s*(\d+)", result.stdout)
+    height_match = re.search(r"pixelHeight:\s*(\d+)", result.stdout)
+    if width_match is None or height_match is None:
+        raise SourceError("could not determine downloaded image dimensions")
+    width = int(width_match.group(1))
+    height = int(height_match.group(1))
+    if (
+        width < MIN_WIDTH
+        or height < MIN_HEIGHT
+        or width / max(height, 1) < MIN_RATIO
+        or width * height > MAX_IMAGE_PIXELS
+    ):
+        raise SourceError("downloaded image does not meet the ultrawide size contract")
+    if expected_size is not None and (width, height) != expected_size:
+        raise SourceError("downloaded image dimensions do not match Wallhaven metadata")
+    return width, height
+
+
+def parse_crop_position(raw: str) -> float:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as error:
+        raise SourceError("crop position must be a number from 0 to 1") from error
+    if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+        raise SourceError("crop position must be a number from 0 to 1")
+    return value
+
+
+def crop_dimensions(
+    width: int,
+    height: int,
+    position_x: float,
+    position_y: float,
+) -> Tuple[int, int, int, int]:
+    if width / max(height, 1) > TARGET_CROP_ASPECT:
+        crop_height = height
+        crop_width = min(width, max(MIN_WIDTH, round(height * TARGET_CROP_ASPECT)))
+    else:
+        crop_width = width
+        crop_height = min(height, round(width / TARGET_CROP_ASPECT))
+    offset_x = round((width - crop_width) * position_x)
+    offset_y = round((height - crop_height) * position_y)
+    return crop_width, crop_height, offset_x, offset_y
+
+
+def crop_downloaded_image(
+    path: Path,
+    width: int,
+    height: int,
+    position_x: float,
+    position_y: float,
+    expected_type: str,
+    folder: Path,
+    identifier: str,
+    extension: str,
+) -> Tuple[int, int]:
+    crop_width, crop_height, offset_x, offset_y = crop_dimensions(
+        width, height, position_x, position_y
+    )
+    if (crop_width, crop_height) == (width, height):
+        return width, height
+
+    descriptor, cropped_name = tempfile.mkstemp(
+        prefix=".wallhaven-crop-%s." % identifier,
+        suffix=".%s" % extension,
+        dir=str(folder),
+    )
+    os.close(descriptor)
+    cropped = Path(cropped_name)
+    cropped.unlink()
+    try:
+        command = [
+            "/usr/bin/sips",
+            "--cropToHeightWidth", str(crop_height), str(crop_width),
+            "--cropOffset", str(offset_y), str(offset_x),
+            str(path),
+            "--out", str(cropped),
+        ]
+        try:
+            process = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise SourceError("wallpaper crop failed") from error
+        if process.returncode:
+            detail = (process.stderr or process.stdout).strip().splitlines()
+            suffix = detail[-1] if detail else "sips rejected the crop"
+            raise SourceError("wallpaper crop failed: %s" % suffix[:160])
+        cropped_width, cropped_height = verify_image(cropped, expected_type=expected_type)
+        os.chmod(cropped, 0o600)
+        os.replace(cropped, path)
+        return cropped_width, cropped_height
+    finally:
+        try:
+            cropped.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def file_digest(path: Path) -> str:
+    digest_builder = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(256 * 1024), b""):
+            digest_builder.update(chunk)
+    return digest_builder.hexdigest()
+
+
+def download_result(
+    result: Dict[str, Any],
+    replace: bool,
+    crop_position: Optional[Tuple[float, float]] = None,
+) -> Dict[str, Any]:
+    media_url = require_https_url(result["media_url"], ALLOWED_MEDIA_HOSTS, "result media")
+    request = urllib.request.Request(
+        media_url,
+        headers={"Accept": "image/jpeg,image/png", "User-Agent": USER_AGENT},
+        method="GET",
+    )
+    try:
+        response = open_media(request)
+    except (OSError, urllib.error.URLError, urllib.error.HTTPError) as error:
+        raise SourceError("wallpaper download failed: %s" % error) from error
+    temporary: Optional[Path] = None
+    try:
+        content_type = response.headers.get_content_type().lower()
+        extension = CONTENT_EXTENSIONS.get(content_type)
+        if extension is None:
+            raise SourceError("wallpaper response has unsupported MIME type %s" % content_type)
+        raw_length = response.headers.get("Content-Length")
+        length: Optional[int] = None
+        if raw_length is not None:
+            try:
+                length = int(raw_length)
+            except ValueError as error:
+                raise SourceError("wallpaper response has an invalid Content-Length") from error
+            if length <= 0 or length > MAX_DOWNLOAD_BYTES:
+                raise SourceError("wallpaper response exceeds the 80 MiB limit")
+        folder = managed_folder()
+        try:
+            folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if folder.is_symlink() or not folder.is_dir():
+                raise SourceError("managed wallpaper folder is not a trusted directory")
+            os.chmod(folder, 0o700)
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=".wallhaven-%s." % result["id"],
+                suffix=".%s" % extension,
+                dir=str(folder),
+            )
+        except OSError as error:
+            raise SourceError("cannot prepare managed wallpaper folder: %s" % error) from error
+        temporary = Path(temporary_name)
+        digest_builder = hashlib.sha256()
+        received = 0
+        deadline = time.monotonic() + 40
+        with os.fdopen(descriptor, "wb") as handle:
+            while True:
+                if time.monotonic() > deadline:
+                    raise SourceError("wallpaper download exceeded 40 seconds")
+                try:
+                    chunk = response.read(256 * 1024)
+                except OSError as error:
+                    raise SourceError("wallpaper download was interrupted: %s" % error) from error
+                if not chunk:
+                    break
+                received += len(chunk)
+                if received > MAX_DOWNLOAD_BYTES:
+                    raise SourceError("wallpaper response exceeds the 80 MiB limit")
+                handle.write(chunk)
+                digest_builder.update(chunk)
+            if received == 0:
+                raise SourceError("wallpaper response is empty")
+            if length is not None and received != length:
+                raise SourceError("wallpaper response length does not match Content-Length")
+            handle.flush()
+            os.fsync(handle.fileno())
+        expected_size = (result["width"], result["height"])
+        width, height = verify_image(
+            temporary,
+            expected_type=content_type,
+            expected_size=expected_size,
+        )
+        if crop_position is not None:
+            width, height = crop_downloaded_image(
+                temporary,
+                width,
+                height,
+                crop_position[0],
+                crop_position[1],
+                content_type,
+                folder,
+                result["id"],
+                extension,
+            )
+            digest = file_digest(temporary)
+        else:
+            digest = digest_builder.hexdigest()
+        published_size = (width, height)
+        target = folder / ("wallhaven-%s.%s" % (result["id"], extension))
+        lock_path = folder / ".wallhaven-import.lock"
+        try:
+            lock_descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            with os.fdopen(lock_descriptor, "r+b", closefd=True) as lock_handle:
+                os.chmod(lock_path, 0o600)
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+                already_present = False
+                if os.path.lexists(target):
+                    metadata = target.lstat()
+                    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+                        raise SourceError("managed wallpaper collision is not a regular file")
+                    if metadata.st_size <= 0 or metadata.st_size > MAX_DOWNLOAD_BYTES:
+                        raise SourceError("managed wallpaper collision has an invalid size")
+                    existing_builder = hashlib.sha256()
+                    with target.open("rb") as existing:
+                        for chunk in iter(lambda: existing.read(256 * 1024), b""):
+                            existing_builder.update(chunk)
+                    if existing_builder.hexdigest() == digest:
+                        width, height = verify_image(
+                            target,
+                            expected_type=content_type,
+                            expected_size=published_size,
+                        )
+                        os.chmod(target, 0o600)
+                        already_present = True
+                    elif not replace:
+                        raise SourceError(
+                            "managed wallpaper already exists with different bytes; use --replace"
+                        )
+                if not already_present:
+                    os.chmod(temporary, 0o600)
+                    os.replace(temporary, target)
+                    directory_descriptor = os.open(folder, os.O_RDONLY)
+                    try:
+                        os.fsync(directory_descriptor)
+                    finally:
+                        os.close(directory_descriptor)
+        except OSError as error:
+            raise SourceError("could not publish managed wallpaper: %s" % error) from error
+    finally:
+        try:
+            response.close()
+        except Exception:
+            pass
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+    warning = ""
+    if os.environ.get("MACPP_WALLPAPER_SOURCE_TESTING") != "1":
+        lock_helper = Path(__file__).resolve().with_name("macpp-lockscreen-wallpaper")
+        if lock_helper.is_file() and os.access(lock_helper, os.X_OK):
+            try:
+                derivative = subprocess.run(
+                    [str(lock_helper), "sync", "custom", "--no-select", str(target)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=120,
+                    check=False,
+                )
+                if derivative.returncode:
+                    warning = "native lock-screen derivative failed; desktop import succeeded"
+            except (OSError, subprocess.TimeoutExpired):
+                warning = "native lock-screen derivative timed out; desktop import succeeded"
+        else:
+            warning = "native lock-screen helper is unavailable; desktop import succeeded"
+
+    notified = notify_catalog(target)
+    return {
+        "path": str(target),
+        "width": width,
+        "height": height,
+        "sha256": digest,
+        "already_present": already_present,
+        "warning": warning,
+        "catalog_notified": notified,
+    }
+
+
+def notify_catalog(path: Path) -> bool:
+    if os.environ.get("MACPP_WALLPAPER_SOURCE_TESTING") == "1":
+        log_path = os.environ.get("MACPP_WALLPAPER_SOURCE_NOTIFICATION_LOG")
+        if not log_path:
+            return False
+        try:
+            with Path(log_path).open("a", encoding="utf-8") as handle:
+                handle.write(str(path))
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            return True
+        except OSError:
+            return False
+    script = r'''
+ObjC.import("Foundation");
+function run(argv) {
+  const info = $.NSMutableDictionary.dictionary;
+  info.setObjectForKey($(argv[0]), $("path"));
+  $.NSDistributedNotificationCenter.defaultCenter
+    .postNotificationNameObjectUserInfoDeliverImmediately(
+      $("org.macplusplus.macpp-wallpaper.catalog-changed"), undefined, info, true
+    );
+}
+'''
+    try:
+        result = subprocess.run(
+            ["/usr/bin/osascript", "-l", "JavaScript", "-e", script, "--", str(path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="macpp-wallpaper-source")
+    commands = parser.add_subparsers(dest="command", required=True)
+    search = commands.add_parser("search", help="search eligible Wallhaven ultrawides")
+    search.add_argument("query", nargs="?", default="")
+    search.add_argument("--page", type=int, default=1)
+    search.add_argument("--limit", type=int, default=12)
+    search.add_argument("--json", action="store_true")
+    import_command = commands.add_parser("import", help="preview or import one Wallhaven result")
+    import_command.add_argument("source")
+    import_command.add_argument("--replace", action="store_true")
+    import_command.add_argument("--apply", action="store_true")
+    import_command.add_argument("--crop-x")
+    import_command.add_argument("--crop-y")
+    import_command.add_argument("--json", action="store_true")
+    commands.add_parser("self-test", help=argparse.SUPPRESS)
+    return parser
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "self-test":
+            assert clean_query("  red   sky ") == "red sky"
+            try:
+                clean_query("red\nsky")
+                raise AssertionError("control character accepted")
+            except SourceError:
+                pass
+            assert extract_identifier("https://wallhaven.cc/w/94x38z") == "94x38z"
+            assert extract_identifier("https://w.wallhaven.cc/full/94/wallhaven-94x38z.jpg") == "94x38z"
+            try:
+                require_https_url("https://wallhaven.cc:broken/w/94x38z", ALLOWED_PAGE_HOSTS, "fixture")
+                raise AssertionError("invalid port accepted")
+            except SourceError:
+                pass
+            try:
+                require_https_url(
+                    "https://wallhaven.cc/" + ("a" * 4096),
+                    ALLOWED_PAGE_HOSTS,
+                    "fixture",
+                )
+                raise AssertionError("oversized URL accepted")
+            except SourceError:
+                pass
+            handler = StrictRedirectHandler(ALLOWED_PAGE_HOSTS)
+            allowed = handler.redirect_request(
+                urllib.request.Request("https://wallhaven.cc/api/v1/search"),
+                None,
+                302,
+                "Found",
+                {},
+                "https://www.wallhaven.cc/api/v1/search?page=2",
+            )
+            assert allowed is not None
+            assert allowed.full_url == "https://www.wallhaven.cc/api/v1/search?page=2"
+            try:
+                handler.redirect_request(
+                    urllib.request.Request("https://wallhaven.cc/api/v1/search"),
+                    None,
+                    302,
+                    "Found",
+                    {},
+                    "https://example.com/escape",
+                )
+                raise AssertionError("off-host redirect accepted")
+            except SourceError:
+                pass
+            pagination = normalize_search(
+                {
+                    "data": [],
+                    "meta": {"current_page": 100, "last_page": 800, "total": 0},
+                },
+                12,
+            )
+            assert pagination["page"] == 100
+            assert pagination["last_page"] == 100
+            print("MacPlusPlus wallpaper source: PASS")
+            return 0
+        if args.command == "search":
+            if not 1 <= args.page <= 100:
+                parser.error("--page must be from 1 through 100")
+            if not 1 <= args.limit <= 24:
+                parser.error("--limit must be from 1 through 24")
+            query = clean_query(args.query)
+            output = normalize_search(request_json(build_search_url(query, args.page)), args.limit)
+            output["query"] = query
+            if args.json:
+                print(json.dumps(output, sort_keys=True, separators=(",", ":")))
+            else:
+                print("Wallhaven — %d eligible result(s), page %d/%d" % (
+                    len(output["results"]), output["page"], output["last_page"]
+                ))
+                for item in output["results"]:
+                    print("%-12s  %-11s  %s" % (item["id"], item["resolution"], item["page_url"]))
+            return 0
+        identifier = extract_identifier(args.source)
+        crop_position: Optional[Tuple[float, float]] = None
+        if args.crop_x is not None or args.crop_y is not None:
+            if args.crop_x is None or args.crop_y is None:
+                raise SourceError("crop x and y must be provided together")
+            crop_position = (
+                parse_crop_position(args.crop_x),
+                parse_crop_position(args.crop_y),
+            )
+        if not args.apply:
+            output = {
+                "schema_version": 1,
+                "dry_run": True,
+                "id": identifier,
+                "detail_url": DETAIL_ENDPOINT.format(identifier=identifier),
+                "destination_folder": str(managed_folder()),
+                "would_replace": bool(args.replace),
+                "would_crop": crop_position is not None,
+            }
+        else:
+            detail = detail_for_identifier(identifier)
+            imported = download_result(detail, args.replace, crop_position)
+            output = {
+                "schema_version": 1,
+                "dry_run": False,
+                "id": identifier,
+                **imported,
+            }
+        if args.json:
+            print(json.dumps(output, sort_keys=True, separators=(",", ":")))
+        elif output["dry_run"]:
+            print("DRY-RUN  import Wallhaven %s into %s" % (identifier, output["destination_folder"]))
+            print("Rerun with --apply after reviewing the identifier.")
+        else:
+            print("Imported Wallhaven %s -> %s" % (identifier, output["path"]))
+            if output.get("warning"):
+                print("Warning: %s" % output["warning"], file=sys.stderr)
+        return 0
+    except SourceError as error:
+        print("macpp-wallpaper-source: %s" % error, file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        raise SystemExit(130)

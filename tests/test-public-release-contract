@@ -1,0 +1,10 @@
+#!/bin/zsh
+set -euo pipefail
+
+ROOT="${0:A:h:h}"
+"$ROOT/bin/macpp-public-release-check"
+
+zsh -n "$ROOT/apps/AudioCore/build-public-audio.sh"
+zsh -n "$ROOT/config/yabai/macpp-shell.yabairc"
+
+print -r -- "public-shell release contract: PASS"

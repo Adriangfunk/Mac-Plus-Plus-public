@@ -1,0 +1,10 @@
+#!/bin/zsh
+set -euo pipefail
+ROOT="${0:A:h:h}"
+TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/macpp-public-setup-plan.XXXXXX")"
+trap '/bin/rm -rf -- "$TEMP_DIR"' EXIT INT TERM
+swiftc -warnings-as-errors \
+  "$ROOT/Source/MacPlusPlusCore/MacPlusPlusSetupPlan.swift" \
+  "$ROOT/tests/test-public-setup-plan.swift" \
+  -o "$TEMP_DIR/test-public-setup-plan"
+"$TEMP_DIR/test-public-setup-plan"

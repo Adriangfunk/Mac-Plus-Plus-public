@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""Read-only hygiene and contract checks for the public Mac++ profile."""
+
+from __future__ import annotations
+
+import json
+import plistlib
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+ALLOWED_ROOT = {".gitattributes", ".gitignore", "README.md", "Source", "apps", "bin", "config", "docs", "tests"}
+EXTERNAL_COMPONENTS = {"drift", "vendor", "third_party", "third-party", "external", "external-repos", "submodules"}
+FORBIDDEN_SUFFIXES = {".app", ".dylib", ".so", ".sqlite", ".db", ".bin", ".mobileprovision", ".p12", ".pfx", ".pem", ".key"}
+
+# These patterns identify account-specific data without embedding any account
+# name or secret value in the checker itself.
+PRIVATE_PATTERNS = (
+    re.compile(r"/(?:Users|home)/[A-Za-z0-9._-]+"),
+    re.compile(r"/" + "Volumes" + r"/[^/\\\s\"']+"),
+    re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE),
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    re.compile(
+        r"\b(?:password|passwd|secret|token|api[_-]?key|access[_-]?key)\b\s*[:=]\s*['\"](?!\\$\\{|YOUR_|CHANGE_ME|REDACTED)[^'\"]{12,}['\"]",
+        re.IGNORECASE,
+    ),
+)
+
+
+def fail(message: str) -> None:
+    raise SystemExit(f"public-shell release check: {message}")
+
+
+def tracked_and_unignored_files() -> list[Path]:
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+            cwd=ROOT,
+            check=True,
+            stdout=subprocess.PIPE,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        fail(f"could not enumerate the Git worktree: {error}")
+    return [ROOT / item.decode("utf-8") for item in result.stdout.split(b"\0") if item]
+
+
+def check_tree(files: list[Path]) -> None:
+    roots = {path.relative_to(ROOT).parts[0] for path in files if path.exists()}
+    unexpected = sorted(roots - ALLOWED_ROOT)
+    if unexpected:
+        fail(f"unexpected top-level content: {', '.join(unexpected)}")
+    for path in files:
+        if not path.exists():
+            continue
+        relative = path.relative_to(ROOT)
+        if path.is_symlink():
+            fail(f"symbolic links are not allowed in the public tree: {relative}")
+        components = {component.casefold() for component in relative.parts}
+        if components & EXTERNAL_COMPONENTS:
+            fail(f"external or vendored repository content found at {relative}")
+        if path.suffix.casefold() in FORBIDDEN_SUFFIXES:
+            fail(f"generated binary or credential file found at {relative}")
+        if path.name.casefold() in {".gitmodules", ".env", ".env.local", "id_rsa", "id_ed25519"}:
+            fail(f"local metadata or credential file found at {relative}")
+        try:
+            content = path.read_bytes().decode("utf-8")
+        except UnicodeDecodeError:
+            fail(f"non-text file found in public source tree: {relative}")
+        for pattern in PRIVATE_PATTERNS:
+            if pattern.search(content):
+                fail(f"account-specific or credential-like data found in {relative}")
+
+
+def load_json(relative: str):
+    path = ROOT / relative
+    try:
+        return path, json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        fail(f"{relative} is not readable JSON: {error}")
+
+
+def require_contains(relative: str, *needles: str) -> str:
+    try:
+        text = (ROOT / relative).read_text(encoding="utf-8")
+    except OSError as error:
+        fail(f"cannot read {relative}: {error}")
+    for needle in needles:
+        if needle not in text:
+            fail(f"{relative} is missing required public behavior: {needle}")
+    return text
+
+
+def main() -> int:
+    files = tracked_and_unignored_files()
+    check_tree(files)
+
+    profile_path, profile = load_json("config/public-shell.json")
+    if profile.get("profile") != "public-shell" or profile.get("schema_version") != 1:
+        fail("profile metadata is not version 1 public-shell")
+    if profile.get("product", {}).get("public_compile_define") != "MACPP_PUBLIC_RELEASE":
+        fail("public compile define drifted")
+    if profile.get("product", {}).get("default_load") is not False:
+        fail("public product default_load must remain false")
+
+    manifest_path, manifest = load_json(profile["launch_agents"]["manifest"])
+    allowed = set(profile["launch_agents"]["allowed_labels"])
+    if set(manifest) != allowed:
+        fail("public manifest labels do not match the allowlist")
+    for label, spec in manifest.items():
+        if spec.get("run_at_load") is not False or spec.get("keep_alive") is not False:
+            fail(f"{label} is configured to auto-load or keep alive")
+        if spec.get("args") != ["{{MACPP_ROOT}}/bin/macpp-public-shell-launch"]:
+            fail(f"{label} does not use the public-only launcher")
+
+    launcher = require_contains("bin/macpp-public-shell-launch", 'exec /usr/bin/open "$SHELL_APP"', "build/Mac++ Shell.app")
+    for token in ("macpp-deck", "macpp-repair-local-links", "macpp-migrate-legacy-state"):
+        if token in launcher:
+            fail("public launcher contains a private startup dependency")
+    shell_source = require_contains(
+        "Source/MacPlusPlusCaelestiaShell/Sources/MacPlusPlusShell.swift",
+        'org.macplusplus.setup.notification-settings',
+        'com.apple.Notifications-Settings.extension',
+        "var startupSurfaceGateActive: Bool { false }",
+    )
+    if "login-work-mode" in shell_source or "showNotificationTestFromCLI" in shell_source:
+        fail("public Shell contains an external startup or notification-content integration")
+
+    shell_build = require_contains(
+        "Source/MacPlusPlusCaelestiaShell/build.sh",
+        "MACPP_PUBLIC_RELEASE",
+        "/build",
+        "codesign",
+    )
+    if re.search(r"launchctl\s+(?:load|kickstart)|\bopen\s+-a\b", shell_build):
+        fail("Shell build script starts or loads the built app")
+
+    require_contains(
+        "Source/MacPlusPlusCaelestiaShell/Sources/MacPlusPlusPublicSetupManager.swift",
+        "MacPlusPlusPublicSetupManager",
+        "Wi-Fi controls",
+        "Nearby Wi-Fi scan",
+        "notificationCard",
+        "yabai",
+        "SIP",
+        "does not read other apps’ notification contents",
+    )
+    if "MacPlusPlusPublicSetupManager(onChange:" not in require_contains(
+        "Source/MacPlusPlusCaelestiaShell/Sources/MacPlusPlusShell.swift",
+        "MacPlusPlusPublicSetupManager(onChange:",
+    ):
+        fail("setup manager is not connected to the Shell")
+    require_contains(
+        "Source/MacPlusPlusCore/MacPlusPlusYabaiConfiguration.swift",
+        'string(forKey: "org.macplusplus.setup.yabai")',
+        'selectedLevel == "standard" || selectedLevel == "scriptingAddition"',
+    )
+    require_contains(
+        "Source/MacPlusPlusCast/Sources/MacPlusPlusCast.swift",
+        'org.macplusplus.setup.screen-capture',
+        "macppColorPickerURL()",
+        'case "native:color-picker"',
+    )
+    audio_engine = require_contains(
+        "apps/AudioCore/macpp_audio_engine.m",
+        '"spectrum_hardware"',
+        "macpp_audio_shared_publish",
+    )
+    if "macpp_audio_pcm_publish" in audio_engine or "_pcmScratch" in audio_engine:
+        fail("public audio visualization must publish aggregate data without raw PCM")
+    require_contains(
+        "apps/AudioCore/macpp_audio_shared.h",
+        "MACPP_AUDIO_SHARED_JSON_CAPACITY 16384",
+        "MACPP_AUDIO_SHARED_VERSION",
+    )
+    require_contains(
+        "Source/MacPlusPlusCore/MacPlusPlusSetupPlan.swift",
+        "case core",
+        "case systemControls",
+        "case windowManagement",
+        "case advanced",
+        "scripting addition requires",
+        "Mac++ will not change SIP",
+    )
+    disabled_services = require_contains(
+        "Source/MacPlusPlusCaelestiaShell/Sources/MacPlusPlusPublicDisabledServices.swift",
+        "do not connect to a tactile helper",
+        "makeDefault() -> MacPlusPlusClipboardHistoryController? { nil }",
+    )
+    if "NotificationSocketClient" in disabled_services or "NotificationBannerSuppressor" in disabled_services:
+        fail("public Shell must leave notification handling to macOS")
+
+    for relative in (
+        "Source/MacPlusPlusCaelestiaShell/Info.plist",
+        "Source/MacPlusPlusCast/Info.plist",
+        "apps/AudioCore/PublicAudioInfo.plist",
+    ):
+        try:
+            plistlib.loads((ROOT / relative).read_bytes())
+        except Exception as error:  # pragma: no cover - diagnostic message
+            fail(f"{relative} is not a readable plist: {error}")
+
+    rules = require_contains("config/yabai/macpp-shell.yabairc", "Mac\\+\\+ Shell", "MacPlusPlusCast", "manage=off", "layer=above")
+    if "sudo" in rules.casefold():
+        fail("yabai rules must not run privileged commands")
+    require_contains("config/palettes.json", '"presets"')
+
+    print(f"Mac++ public-shell release contract: PASS ({profile_path.name}, {manifest_path.name})")
+    print(f"Public source hygiene: PASS ({len(files)} files; no account paths, credentials, binaries, or external repositories)")
+    print("No app was opened, installed, or loaded; no LaunchAgent or startup setting was changed.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
