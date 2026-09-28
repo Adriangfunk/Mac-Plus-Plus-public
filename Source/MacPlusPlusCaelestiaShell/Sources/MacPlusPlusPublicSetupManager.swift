@@ -299,7 +299,7 @@ struct MacPlusPlusPublicSetupManager: View {
         case .off:
             "No yabai service, rules, or Accessibility request."
         case .standard:
-            "Install yabai separately and approve Accessibility. Basic window management works with SIP enabled; scripting-addition features are omitted."
+            "Install yabai separately and approve Accessibility. Recent compatible releases move windows with SIP enabled; scripting-addition features are omitted."
         case .scriptingAddition:
             "Adds yabai’s scripting addition. Requires a manual RecoveryOS security change and an explicit decision to accept the reduced protections."
         }

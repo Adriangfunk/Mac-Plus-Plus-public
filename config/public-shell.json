@@ -33,7 +33,7 @@
     "screen_capture": "One-shot capture tools request access only when the user invokes them.",
     "audio": "The generic local audio helper is separate and needs System Audio Recording consent when started.",
     "accessibility": "Accessibility and Input Monitoring are only relevant for selected window or input actions.",
-    "yabai": "Standard yabai can run with SIP enabled; the scripting addition requires a manual RecoveryOS security decision."
+    "yabai": "Compatible current yabai releases support Mac++ workspace moves with SIP enabled; the optional scripting addition requires a manual RecoveryOS security decision."
   },
   "excluded_features": [
     "notification-content-capture",

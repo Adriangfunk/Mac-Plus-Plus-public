@@ -16,7 +16,6 @@ import UniformTypeIdentifiers
 import Combine
 import AVKit
 import AVFoundation
-import Vision
 import ApplicationServices
 
 private let mediaPath = ProcessInfo.processInfo.environment["MACPP_SHELL_MEDIA_PATH"] ?? "/tmp/macpp-media.json"
@@ -667,11 +666,11 @@ private func runMacPlusPlusYabai(_ arguments: [String], waitUntilExit: Bool = fa
     return true
 }
 
-/// Reads the currently visible yabai space without changing focus. Window
+/// Reads the currently visible yabai space selector without changing focus. Window
 /// transfers are background operations in MacPlusPlus; this lets the move path put
 /// the user back on the space they were already looking at if yabai briefly
 /// follows the moved window on a particular version/configuration.
-private func macppFocusedSpaceLabel() -> String? {
+private func macppFocusedSpaceSelector() -> String? {
     let pipe = Pipe()
     let process = Process()
     guard let yabaiExecutable = macppYabaiExecutableURL() else { return nil }
@@ -679,15 +678,14 @@ private func macppFocusedSpaceLabel() -> String? {
     process.arguments = ["-m", "query", "--spaces", "--space"]
     process.standardOutput = pipe
     process.standardError = FileHandle.nullDevice
-    guard (try? process.run()) != nil else { return nil } // macpp:silent-ok optional yabai is unavailable on first launch; the caller falls back to no focused-space label
+    guard (try? process.run()) != nil else { return nil } // macpp:silent-ok optional yabai is unavailable on first launch; the caller skips focus restoration
     process.waitUntilExit()
     guard let data = try? pipe.fileHandleForReading.readToEnd(), // macpp:silent-ok yabai output is optional; the caller falls back to no focused-space label
           let object = try? JSONSerialization.jsonObject(with: data), // macpp:silent-ok malformed yabai output is treated as unavailable
           let space = object as? [String: Any] else { return nil }
+    if let index = (space["index"] as? NSNumber)?.intValue,
+       (1...CaelestiaParityTokens.Sizes.workspaceCount).contains(index) { return String(index) }
     if let label = space["label"] as? String, !label.isEmpty { return label }
-    if let index = space["index"] as? Int {
-        return macppWorkspaceLabels.dropFirst(max(0, index - 1)).first
-    }
     return nil
 }
 
@@ -5265,6 +5263,112 @@ private let macppWallpaperImageExtensions = ["jpg", "jpeg", "png", "heic", "webp
 private let macppWallpaperMediaExtensions = macppWallpaperVideoExtensions + macppWallpaperImageExtensions
 private let macppWallpaperCatalogChangedNotification = Notification.Name("org.macplusplus.macpp-wallpaper.catalog-changed")
 private let macppWallpaperFramingChangedNotification = Notification.Name("org.macplusplus.macpp-wallpaper.framing-changed")
+private let macppWorkspaceAssignmentsPreferenceKey = "org.macplusplus.workspace-assignments"
+
+private func macppStableStringHash(_ value: String) -> String {
+    var hash: UInt64 = 14_695_981_039_346_656_037
+    for byte in value.utf8 {
+        hash = (hash ^ UInt64(byte)) &* 1_099_511_628_211
+    }
+    return String(hash, radix: 16)
+}
+
+private func macppWorkspaceAssignmentRuleStem(for appName: String) -> String {
+    "macpp-app-\(macppStableStringHash(appName))"
+}
+
+private func macppWallpaperCompanionResourceURL(_ relativePath: String) -> URL? {
+    let appRoots = [
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Applications/Mac++ Wallpaper.app", isDirectory: true),
+        URL(fileURLWithPath: "/Applications/Mac++ Wallpaper.app", isDirectory: true)
+    ]
+    for appRoot in appRoots {
+        let resource = appRoot.appendingPathComponent("Contents/Resources", isDirectory: true)
+            .appendingPathComponent(relativePath)
+        if FileManager.default.fileExists(atPath: resource.path) {
+            return resource.standardizedFileURL
+        }
+    }
+    return nil
+}
+
+/// Persists the app-to-space choices locally and reconciles them with yabai's
+/// in-memory rules. yabai rules only affect new windows unless explicitly
+/// applied, so the assignment is applied to windows that are already open too.
+private actor MacPlusPlusWorkspaceAssignmentCoordinator {
+    static let shared = MacPlusPlusWorkspaceAssignmentCoordinator()
+
+    func assign(appName: String, toSpace space: Int) -> Bool {
+        guard !appName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              (1...CaelestiaParityTokens.Sizes.workspaceCount).contains(space),
+              let executable = MacPlusPlusYabaiConfiguration.executableURL() else { return false }
+        let stem = macppWorkspaceAssignmentRuleStem(for: appName)
+        let label = "\(stem)-space-\(space)"
+        guard let rules = readRules(executable: executable) else { return false }
+        let previousLabels = labels(in: rules, matching: stem)
+
+        if !previousLabels.contains(label) {
+            let appPattern = NSRegularExpression.escapedPattern(for: appName)
+            let added = runBoundedShellCommand(
+                executable.path,
+                ["-m", "rule", "--add", "label=\(label)", "app=^\(appPattern)$", "space=\(space)"],
+                timeout: 4
+            )
+            guard added.succeeded else { return false }
+        }
+
+        let applied = runBoundedShellCommand(
+            executable.path, ["-m", "rule", "--apply", label], timeout: 4
+        )
+        guard applied.succeeded else {
+            if !previousLabels.contains(label) {
+                _ = runBoundedShellCommand(
+                    executable.path, ["-m", "rule", "--remove", label], timeout: 4
+                )
+            }
+            return false
+        }
+
+        for previous in previousLabels where previous != label {
+            _ = runBoundedShellCommand(
+                executable.path, ["-m", "rule", "--remove", previous], timeout: 4
+            )
+        }
+        return true
+    }
+
+    func remove(appName: String) -> Bool {
+        guard let executable = MacPlusPlusYabaiConfiguration.executableURL() else { return false }
+        let stem = macppWorkspaceAssignmentRuleStem(for: appName)
+        guard let rules = readRules(executable: executable) else { return false }
+        for label in labels(in: rules, matching: stem) {
+            let removed = runBoundedShellCommand(
+                executable.path, ["-m", "rule", "--remove", label], timeout: 4
+            )
+            guard removed.succeeded else { return false }
+        }
+        return true
+    }
+
+    private func readRules(executable: URL) -> [[String: Any]]? {
+        let result = runBoundedShellCommand(executable.path, ["-m", "rule", "--list"], timeout: 4)
+        guard result.succeeded,
+              let data = result.output.data(using: .utf8),
+              let rules = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            return nil
+        }
+        return rules
+    }
+
+    private func labels(in rules: [[String: Any]], matching stem: String) -> [String] {
+        rules.compactMap { rule in
+            guard let label = rule["label"] as? String,
+                  label == stem || label.hasPrefix(stem + "-") else { return nil }
+            return label
+        }
+    }
+}
 
 private enum WallpaperPaletteExtractor {
     private static func clamp(_ value: CGFloat, _ lower: CGFloat, _ upper: CGFloat) -> CGFloat {
@@ -5308,6 +5412,21 @@ private enum WallpaperPaletteExtractor {
             return NSImage(cgImage: image, size: .zero)
         }
         return NSImage(contentsOf: url)
+    }
+
+    static func nativeDesktopPosterData(for url: URL) async -> Data? {
+        let asset = AVURLAsset(url: url)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = CMTime(seconds: 0.5, preferredTimescale: 600)
+        generator.requestedTimeToleranceAfter = CMTime(seconds: 0.5, preferredTimescale: 600)
+        generator.maximumSize = CGSize(width: 2560, height: 1440)
+        guard let image = try? await generator.image( // macpp:silent-ok unsupported or damaged video falls back to the user's previous desktop image
+            at: CMTime(seconds: 1, preferredTimescale: 600)
+        ).image else { return nil }
+        return NSBitmapImageRep(cgImage: image).representation(
+            using: .jpeg, properties: [.compressionFactor: 0.92]
+        )
     }
 
     static func extractHexColors(from url: URL) async -> [String: String] {
@@ -5449,6 +5568,34 @@ private enum WallpaperPaletteExtractor {
             PaletteRole.text.rawValue: textColor.macppHex,
             PaletteRole.accent.rawValue: accent.macppHex
         ]
+    }
+}
+
+private func macppNativeDesktopWallpaperPosterURL(for sourceURL: URL) async -> URL? {
+    let root = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/MacPlusPlus/NativePosters", isDirectory: true)
+    let sourceValues = try? sourceURL.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+    let sourceFingerprint = [
+        sourceURL.standardizedFileURL.path,
+        String(sourceValues?.fileSize ?? -1),
+        String(sourceValues?.contentModificationDate?.timeIntervalSince1970 ?? 0)
+    ].joined(separator: "|")
+    let destination = root
+        .appendingPathComponent(macppStableStringHash(sourceFingerprint))
+        .appendingPathExtension("jpg")
+    if let values = try? destination.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+       values.isRegularFile == true, values.isSymbolicLink != true {
+        return destination
+    }
+    guard let data = await WallpaperPaletteExtractor.nativeDesktopPosterData(for: sourceURL) else {
+        return nil
+    }
+    do {
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try data.write(to: destination, options: .atomic)
+        return destination
+    } catch {
+        return nil
     }
 }
 
@@ -8407,6 +8554,8 @@ private func macppSystemUptimeText() -> String {
     private var workspaceRefreshGeneration = 0
     private var workspaceAppsRefreshTask: Task<Void, Never>?
     private var workspaceAppsRefreshPending = false
+    private var workspaceAssignmentsNeedReconcile = true
+    private var nativeWallpaperApplyGeneration: UInt64 = 0
     private var appRailRefreshGeneration = 0
     /// Where the last transport command was routed, surfaced in the debug
     /// dump. Which player a play/pause reaches is otherwise unobservable.
@@ -8431,6 +8580,8 @@ private func macppSystemUptimeText() -> String {
     @Published var workspaces: [WorkspaceInfo] = macppWorkspaceNames.enumerated().map { index, name in
         WorkspaceInfo(id: index + 1, name: name, apps: [], available: false)
     }
+    @Published private(set) var workspaceAssignments: [String: Int] =
+        UserDefaults.standard.dictionary(forKey: macppWorkspaceAssignmentsPreferenceKey) as? [String: Int] ?? [:]
     @Published private(set) var appRailApplications: [AppRailApplication] = []
     @Published var selectedPalette = ShellPalette.current
     @Published var companionRevision = 0
@@ -8489,113 +8640,6 @@ private func macppSystemUptimeText() -> String {
     private var workspaceFocusRefreshTask: Task<Void, Never>?
     private var workspaceFocusRefreshPending = false
     private var workspaceFocusRefreshForcePending = false
-    // Resolved once at launch. Precedence, most stable first:
-    //   1. ~/Library/Application Support/MacPlusPlus/profile-photo.<ext>
-    //   2. ~/.face  (caelestia's own convention for exactly this)
-    //   3. the newest image sitting in ~/Downloads
-    // Case 3 also *copies* what it finds into case 1, so the avatar stops
-    // depending on Downloads the moment it is first picked up -- otherwise
-    // the next thing downloaded would silently become the profile picture.
-    @Published var profilePhoto: NSImage?
-
-    /// Crops the photo to a square centred on its subject's face.
-    ///
-    /// A circular avatar built with `scaledToFill` always keeps the image's
-    /// *geometric* centre, which is almost never where a face is -- portraits
-    /// put the head in the upper portion, so the crop lands on a chin or a
-    /// torso. Cropping here, once at load, means the view stays a plain
-    /// centred image and cannot get this wrong.
-    ///
-    /// Vision is trained on human faces and will not detect a stylised or
-    /// illustrated one, so a miss is expected rather than exceptional. The
-    /// fallback uses a portrait focal point instead of the geometric centre;
-    /// this keeps the face large even for artwork that Vision cannot classify.
-    private static func squareCroppedToFace(_ image: NSImage) -> NSImage {
-        var rect = CGRect(origin: .zero, size: image.size)
-        guard let cgImage = image.cgImage(forProposedRect: &rect, context: nil, hints: nil) else {
-            return image
-        }
-        let width = CGFloat(cgImage.width)
-        let height = CGFloat(cgImage.height)
-        let minimumDimension = min(width, height)
-        guard minimumDimension > 0 else { return image }
-
-        // Use a tighter square so a portrait is not reduced to a tiny subject
-        // inside the dashboard circle. The current portrait is stylised enough
-        // that Vision can miss its face, so the fallback is deliberately
-        // biased toward the eyes rather than the geometric centre.
-        let cropScale: CGFloat = height > width ? 0.54 : 0.70
-        let side = minimumDimension * cropScale
-        // Fallback focal point for stylised art: the current profile image has
-        // its face just left of centre and well above the vertical midpoint.
-        var centreX = height > width ? width * 0.42 : width * 0.5
-        var centreY = height > width ? height * 0.31 : height * 0.5
-
-        let request = VNDetectFaceRectanglesRequest()
-        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        try? handler.perform([request]) // macpp:silent-ok face detection is opportunistic; the configured focal point remains valid
-        if let faces = request.results, !faces.isEmpty {
-            // Largest face wins -- a group shot should centre on the subject.
-            let largest = faces.max { $0.boundingBox.width * $0.boundingBox.height < $1.boundingBox.width * $1.boundingBox.height }
-            if let box = largest?.boundingBox {
-                // Vision normalises with a bottom-left origin; CGImage crops
-                // from the top-left, so the y axis has to be flipped.
-                centreX = box.midX * width
-                // Bias fractionally above the face centre so the crop keeps
-                // the top of the head rather than cutting it flat.
-                centreY = height - (box.midY * height) - side * 0.04
-            }
-        }
-
-        var originX = centreX - side / 2
-        var originY = centreY - side / 2
-        originX = min(max(0, originX), width - side)
-        originY = min(max(0, originY), height - side)
-        guard let cropped = cgImage.cropping(to: CGRect(x: originX, y: originY, width: side, height: side)) else {
-            return image
-        }
-        return NSImage(cgImage: cropped, size: NSSize(width: side, height: side))
-    }
-
-    private func loadProfilePhoto() {
-        let fileManager = FileManager.default
-        let home = fileManager.homeDirectoryForCurrentUser
-        let stableDirectory = home
-            .appendingPathComponent("Library/Application Support/MacPlusPlus", isDirectory: true)
-        let extensions = ["png", "jpg", "jpeg", "heic", "webp", "tiff"]
-
-        for ext in extensions {
-            let candidate = stableDirectory.appendingPathComponent("profile-photo.\(ext)")
-            if let image = NSImage(contentsOf: candidate) {
-                profilePhoto = Self.squareCroppedToFace(image); return
-            }
-        }
-        let face = home.appendingPathComponent(".face")
-        if let image = NSImage(contentsOf: face) {
-            profilePhoto = Self.squareCroppedToFace(image); return
-        }
-
-        let downloads = home.appendingPathComponent("Downloads", isDirectory: true)
-        guard let entries = try? fileManager.contentsOfDirectory( // macpp:silent-ok an unreadable Downloads folder has no profile fallback
-            at: downloads,
-            includingPropertiesForKeys: [.contentModificationDateKey],
-            options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
-        ) else { return }
-        let newest = entries
-            .filter { extensions.contains($0.pathExtension.lowercased()) }
-            .max { left, right in
-                let leftDate = (try? left.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast // macpp:silent-ok an unavailable mtime sorts this candidate as oldest
-                let rightDate = (try? right.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast // macpp:silent-ok an unavailable mtime sorts this candidate as oldest
-                return leftDate < rightDate
-            }
-        guard let newest, let image = NSImage(contentsOf: newest) else { return }
-        profilePhoto = Self.squareCroppedToFace(image)
-        try? fileManager.createDirectory(at: stableDirectory, withIntermediateDirectories: true) // macpp:silent-ok profile cache creation is best effort; the source image remains usable
-        let destination = stableDirectory
-            .appendingPathComponent("profile-photo.\(newest.pathExtension.lowercased())")
-        try? fileManager.removeItem(at: destination) // macpp:silent-ok stale profile-cache removal is idempotent cleanup
-        try? fileManager.copyItem(at: newest, to: destination) // macpp:silent-ok profile-cache persistence is optional after the image is loaded
-    }
     @Published var topProcess = "—"
     @Published var battery = "—"
     @Published var batteryPercent = 0
@@ -8785,7 +8829,6 @@ private func macppSystemUptimeText() -> String {
                     self.refreshConnectivity(force: true, includeNearbyInventory: true)
                 }
             }
-            loadProfilePhoto()
             // Re-apply the saved palette to both peripheral drivers after a
             // login or shell restart; Work Mode's baseline must not overwrite
             // the user's selected profile.
@@ -8797,6 +8840,7 @@ private func macppSystemUptimeText() -> String {
             // card with its default PID and zero CPU/RAM values forever.
             refreshFrontApp()
             refreshAppRailApplications(force: true)
+            refreshWorkspaceApps()
             refresh(); scheduleTimer(interval: preferredTimerInterval()); scheduleOutputAudioPoll(); scheduleWorkspaceFocusPoll()
             refreshCinemaStatus(force: true)
             SystemOutputAudio.observeChanges { [weak self] in
@@ -9039,6 +9083,20 @@ private func macppSystemUptimeText() -> String {
                 // snapshot atomically; the host resize observer supplies the
                 // only geometry transition.
                 self.workspaces = spaces
+            }
+            if !self.workspaceAssignments.isEmpty, self.workspaceAssignmentsNeedReconcile {
+                self.workspaceAssignmentsNeedReconcile = false
+                let assignments = self.workspaceAssignments
+                Task { @MainActor [weak self] in
+                    for (appName, space) in assignments {
+                        guard await MacPlusPlusWorkspaceAssignmentCoordinator.shared.assign(
+                            appName: appName, toSpace: space
+                        ) else {
+                            self?.workspaceAssignmentsNeedReconcile = true
+                            break
+                        }
+                    }
+                }
             }
             if self.workspaceAppsRefreshPending {
                 self.workspaceAppsRefreshPending = false
@@ -9531,6 +9589,9 @@ private func macppSystemUptimeText() -> String {
                 deliverImmediately: true
             )
         }
+        if let wallpaperURL = currentWallpaperURL() {
+            applyNativeDesktopWallpaperFallback(from: wallpaperURL)
+        }
         onPaletteChanged?()
     }
 
@@ -9575,6 +9636,7 @@ private func macppSystemUptimeText() -> String {
                     deliverImmediately: true
                 )
             }
+            applyNativeDesktopWallpaperFallback(from: normalized)
             return
         }
         if selectedPalette != .custom,
@@ -9599,6 +9661,7 @@ private func macppSystemUptimeText() -> String {
             ],
             deliverImmediately: true
         )
+        applyNativeDesktopWallpaperFallback(from: normalized)
 
         // The wallpaper engine creates a poster on its utility queue too, but
         // the shell cannot depend on that process being ready (a newly opened
@@ -9782,12 +9845,10 @@ private func macppSystemUptimeText() -> String {
               !raw.isEmpty else { return nil }
         let path: String
         if raw.hasPrefix("bundle://") {
-            path = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(
-                    "Applications/Mac++ Wallpaper.app/Contents/Resources",
-                    isDirectory: true
-                )
-                .appendingPathComponent(String(raw.dropFirst("bundle://".count))).path
+            guard let resource = macppWallpaperCompanionResourceURL(
+                String(raw.dropFirst("bundle://".count))
+            ) else { return nil }
+            path = resource.path
         } else {
             path = (raw as NSString).expandingTildeInPath
         }
@@ -11173,7 +11234,95 @@ spotifyNextTrack = nil
         lastWorkspaceFocusIndex = index
         lastWorkspaceFocusRequestAt = now
         currentWorkspace = index
-        _ = runMacPlusPlusYabai(["-m", "space", "--focus", macppWorkspaceLabels[index - 1]])
+        _ = runMacPlusPlusYabai(["-m", "space", "--focus", String(index)])
+    }
+
+    func assignApplication(_ appName: String, toWorkspace index: Int) {
+        guard !appName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              workspaces.first(where: { $0.id == index })?.available == true else { return }
+        Task { @MainActor [weak self] in
+            let assigned = await MacPlusPlusWorkspaceAssignmentCoordinator.shared.assign(
+                appName: appName, toSpace: index
+            )
+            guard let self else { return }
+            guard assigned else {
+                self.onStateToast?(MacPlusPlusStateToast(
+                    title: "Workspace Rule Failed",
+                    detail: "Check that yabai is running and this workspace is available.",
+                    symbol: "exclamationmark.triangle.fill"
+                ))
+                return
+            }
+            var next = self.workspaceAssignments
+            next[appName] = index
+            self.workspaceAssignments = next
+            UserDefaults.standard.set(next, forKey: macppWorkspaceAssignmentsPreferenceKey)
+            self.workspaceAssignmentsNeedReconcile = false
+            let name = self.workspaces.first(where: { $0.id == index })?.name ?? "Workspace \(index)"
+            self.onStateToast?(MacPlusPlusStateToast(
+                title: "Workspace Rule Saved",
+                detail: "\(appName) will open in \(name).",
+                symbol: "pin.fill"
+            ))
+        }
+    }
+
+    func removeApplicationWorkspaceAssignment(_ appName: String) {
+        guard workspaceAssignments[appName] != nil else { return }
+        Task { @MainActor [weak self] in
+            let removed = await MacPlusPlusWorkspaceAssignmentCoordinator.shared.remove(appName: appName)
+            guard let self else { return }
+            guard removed else {
+                self.onStateToast?(MacPlusPlusStateToast(
+                    title: "Workspace Rule Could Not Be Removed",
+                    detail: "Check that yabai is running, then try again.",
+                    symbol: "exclamationmark.triangle.fill"
+                ))
+                return
+            }
+            var next = self.workspaceAssignments
+            next.removeValue(forKey: appName)
+            self.workspaceAssignments = next
+            UserDefaults.standard.set(next, forKey: macppWorkspaceAssignmentsPreferenceKey)
+            self.onStateToast?(MacPlusPlusStateToast(
+                title: "Workspace Rule Removed",
+                detail: "\(appName) will use the normal macOS workspace behavior.",
+                symbol: "pin.slash"
+            ))
+        }
+    }
+
+    private func applyNativeDesktopWallpaperFallback(from sourceURL: URL) {
+        guard sourceURL.isFileURL, FileManager.default.fileExists(atPath: sourceURL.path) else { return }
+        nativeWallpaperApplyGeneration &+= 1
+        let generation = nativeWallpaperApplyGeneration
+        if macppWallpaperVideoExtensions.contains(sourceURL.pathExtension.lowercased()) {
+            Task { @MainActor [weak self] in
+                let poster = await Task.detached(priority: .utility) {
+                    await macppNativeDesktopWallpaperPosterURL(for: sourceURL)
+                }.value
+                guard let self, generation == self.nativeWallpaperApplyGeneration,
+                      let poster else { return }
+                self.setNativeDesktopWallpaper(poster)
+            }
+        } else {
+            setNativeDesktopWallpaper(sourceURL)
+        }
+    }
+
+    private func setNativeDesktopWallpaper(_ url: URL) {
+        guard FileManager.default.fileExists(atPath: url.path), !NSScreen.screens.isEmpty else { return }
+        let options: [NSWorkspace.DesktopImageOptionKey: Any] = [
+            .imageScaling: NSImageScaling.scaleProportionallyUpOrDown.rawValue,
+            .allowClipping: true
+        ]
+        for screen in NSScreen.screens {
+            do {
+                try NSWorkspace.shared.setDesktopImageURL(url, for: screen, options: options)
+            } catch {
+                MacPlusPlusBoundaryLog.record("native desktop wallpaper could not be set for a display")
+            }
+        }
     }
 
     private func requestWindowlessApplicationReopen(_ application: AppRailApplication) {
@@ -11290,13 +11439,12 @@ spotifyNextTrack = nil
     func moveWindow(_ windowID: Int, toSpace target: Int) {
         guard windowID > 0, (1...CaelestiaParityTokens.Sizes.workspaceCount).contains(target) else { return }
         guard workspaces.first(where: { $0.id == target })?.available == true else { return }
-        let labels = macppWorkspaceLabels
         // Launch yabai directly with argv rather than sending the move through
         // a shell command. This dispatches the summon immediately when the
-        // drag destination releases, and keeps the window id/space label as
+        // drag destination releases, and keeps the window id/space index as
         // typed arguments at the yabai boundary.
-        let label = labels[target - 1]
-        macppWindowDragLog("move id=\(windowID) target=\(label)")
+        let selector = String(target)
+        macppWindowDragLog("move id=\(windowID) target=\(selector)")
         activeWindowDragID = nil
         workspaceDropTarget = nil
         onWindowDragEnd?()
@@ -11309,9 +11457,9 @@ spotifyNextTrack = nil
         // behaviour (which varies slightly by layout/configuration) can be
         // neutralised without ever focusing the moved window.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let origin = macppFocusedSpaceLabel()
+            let origin = macppFocusedSpaceSelector()
             let moved = runMacPlusPlusYabai(
-                ["-m", "window", String(windowID), "--space", label], waitUntilExit: true
+                ["-m", "window", String(windowID), "--space", selector], waitUntilExit: true
             )
             if moved, let origin {
                 _ = runMacPlusPlusYabai(["-m", "space", "--focus", origin], waitUntilExit: true)
@@ -16837,9 +16985,10 @@ private struct MacPlusPlusWallpaperCarouselView: View {
               !raw.isEmpty else { return nil }
         let path: String
         if raw.hasPrefix("bundle://") {
-            path = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Applications/Mac++ Wallpaper.app/Contents/Resources", isDirectory: true)
-                .appendingPathComponent(String(raw.dropFirst("bundle://".count))).path
+            guard let resource = macppWallpaperCompanionResourceURL(
+                String(raw.dropFirst("bundle://".count))
+            ) else { return nil }
+            path = resource.path
         } else {
             path = (raw as NSString).expandingTildeInPath
         }
@@ -25580,6 +25729,12 @@ private struct RailPopoverView: View {
                                 .font(.system(size: ShellIcon.small, weight: .semibold, design: .rounded))
                                 .foregroundStyle(Theme.ice)
                         }
+                        if model.workspaceAssignments[window.app] != nil {
+                            Image(systemName: "pin.fill")
+                                .font(.system(size: ShellIcon.small, weight: .semibold, design: .rounded))
+                                .foregroundStyle(Theme.accent)
+                                .help("This app has a saved workspace assignment")
+                        }
                     }
                     .padding(.horizontal, 8)
                     .frame(height: 31)
@@ -25588,7 +25743,29 @@ private struct RailPopoverView: View {
                         model.beginWindowDrag(window.id)
                         return NSItemProvider(object: NSString(string: "macpp-window:\(window.id)"))
                     }
-                    .help("Drag \(window.displayName) to another workspace")
+                    .contextMenu {
+                        Menu {
+                            ForEach(model.workspaces.filter(\.available)) { destination in
+                                Button {
+                                    model.assignApplication(window.app, toWorkspace: destination.id)
+                                } label: {
+                                    if model.workspaceAssignments[window.app] == destination.id {
+                                        Label(destination.name, systemImage: "checkmark")
+                                    } else {
+                                        Text(destination.name)
+                                    }
+                                }
+                            }
+                        } label: {
+                            Label("Always open \(window.app) in…", systemImage: "pin")
+                        }
+                        if model.workspaceAssignments[window.app] != nil {
+                            Button("Remove app workspace rule", systemImage: "pin.slash") {
+                                model.removeApplicationWorkspaceAssignment(window.app)
+                            }
+                        }
+                    }
+                    .help("Drag \(window.displayName) to move it, or secondary-click to assign the app")
                     }
                 }
             }
@@ -26296,34 +26473,25 @@ private struct NotchPopout: View {
         .frame(maxHeight: .infinity, alignment: .center)
     }
 
-    // Keep the identity block compact and horizontal. The top surface can be
-    // temporarily measured at less than its authored height while AppKit
-    // reattaches a display; a tall avatar-above-name stack then leaves only
-    // the OS/battery row visible. Putting the uptime beside the portrait makes
-    // it part of the first block the user sees and keeps the whole card inside
-    // that short-lived measurement too.
+    // Keep the system overview compact and horizontal. The top surface can be
+    // measured below its authored height while AppKit reattaches a display;
+    // placing the generic Mac icon beside uptime keeps the first status block
+    // readable without looking up a local account name or photo.
     private var systemCard: some View {
         VStack(alignment: .leading, spacing: Spacing.tight) {
             HStack(spacing: Spacing.base) {
-                Group {
-                    if let avatar = model.profilePhoto {
-                        Image(nsImage: avatar).resizable().scaledToFill()
-                    } else {
-                        // Never an empty frame while no photo has been found.
-                        ZStack {
-                            Theme.layerTile
-                            Image(systemName: "person.fill")
-                                .font(.system(size: ShellIcon.feature, weight: .medium, design: .rounded))
-                                .foregroundStyle(Theme.accent)
-                        }
-                    }
+                ZStack {
+                    Theme.layerTile
+                    Image(systemName: "desktopcomputer")
+                        .font(.system(size: ShellIcon.feature, weight: .medium, design: .rounded))
+                        .foregroundStyle(Theme.accent)
                 }
                 .frame(width: 46, height: 46)
                 .clipShape(Circle())
                 .overlay(Circle().stroke(Theme.seam.opacity(0.35), lineWidth: 1))
 
                 VStack(alignment: .leading, spacing: Spacing.hairline) {
-                    Text(NSFullUserName())
+                    Text("THIS MAC")
                         .font(.system(size: ShellTypography.title, weight: .semibold, design: .rounded))
                         .foregroundStyle(Theme.bright).lineLimit(1).minimumScaleFactor(0.75)
                     // Keep this visible even if a delayed system sampler or a
@@ -32413,10 +32581,10 @@ private func macppShellScrollEventTapCallback(
         case .pullWindow:
             guard let windowID,
                   (1...CaelestiaParityTokens.Sizes.workspaceCount).contains(model.currentWorkspace) else { return }
-            let label = macppWorkspaceLabels[model.currentWorkspace - 1]
+            let selector = String(model.currentWorkspace)
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 let moved = runMacPlusPlusYabai(
-                    ["-m", "window", String(windowID), "--space", label],
+                    ["-m", "window", String(windowID), "--space", selector],
                     waitUntilExit: true
                 )
                 let focused = moved && runMacPlusPlusYabai(

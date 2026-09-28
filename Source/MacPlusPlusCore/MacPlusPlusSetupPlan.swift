@@ -21,7 +21,7 @@ enum MacPlusPlusSetupTier: String, CaseIterable, Identifiable {
         switch self {
         case .core: "Shell and Search, with optional permissions and helpers left out."
         case .systemControls: "Add Wi-Fi and Bluetooth controls; choose other permissions separately."
-        case .windowManagement: "Add standard yabai and Accessibility actions while SIP stays enabled."
+        case .windowManagement: "Add yabai workspace moves and Accessibility actions with SIP enabled on compatible yabai releases."
         case .advanced: "Select yabai’s scripting addition for a manual RecoveryOS security decision."
         }
     }
@@ -128,7 +128,7 @@ struct MacPlusPlusSetupSelection: Equatable, Codable {
         case .off:
             lines.append("Window management: macOS defaults; no yabai service or rules.")
         case .standard:
-            lines.append("Window management: yabai with Accessibility permission; SIP remains enabled and scripting-addition features stay off.")
+            lines.append("Window management: compatible current yabai moves windows; SIP remains enabled, macOS may ask for Accessibility; scripting-addition features stay off.")
         case .scriptingAddition:
             lines.append("Advanced window management: yabai scripting addition requires a user-managed partial SIP change from Recovery. Mac++ will not change SIP or configure sudoers.")
         }

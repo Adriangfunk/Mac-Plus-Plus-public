@@ -130,6 +130,15 @@ def main() -> int:
     )
     if "login-work-mode" in shell_source or "showNotificationTestFromCLI" in shell_source:
         fail("public Shell contains an external startup or notification-content integration")
+    for personal_identity_lookup in (
+        "NSFullUserName()",
+        "loadProfilePhoto",
+        "profilePhoto",
+        "VNDetectFaceRectanglesRequest",
+        'home.appendingPathComponent(".face")',
+    ):
+        if personal_identity_lookup in shell_source:
+            fail("public Shell automatically reads personal account or profile-photo data")
 
     shell_build = require_contains(
         "Source/MacPlusPlusCaelestiaShell/build.sh",
@@ -204,9 +213,12 @@ def main() -> int:
         except Exception as error:  # pragma: no cover - diagnostic message
             fail(f"{relative} is not a readable plist: {error}")
 
-    rules = require_contains("config/yabai/macpp-shell.yabairc", "Mac\\+\\+ Shell", "MacPlusPlusCast", "manage=off", "layer=above")
+    rules = require_contains("config/yabai/macpp-shell.yabairc", "Mac\\+\\+ Shell", "MacPlusPlusCast", "manage=off")
     if "sudo" in rules.casefold():
         fail("yabai rules must not run privileged commands")
+    for unsupported_rule in ("sticky=on", "layer=above", "topmost=on"):
+        if unsupported_rule in rules:
+            fail(f"yabai rules contain an unsupported or privileged property: {unsupported_rule}")
     require_contains("config/palettes.json", '"presets"')
 
     print(f"Mac++ public-shell release contract: PASS ({profile_path.name}, {manifest_path.name})")

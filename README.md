@@ -1,28 +1,79 @@
 # Mac++
 
-Mac++ is a customizable macOS shell with Search, system controls, wallpaper and palette tools, and optional window-management integrations.
+Mac++ brings a customizable shell to macOS: a quick app and file search, the
+Nexus system dashboard, workspace controls, media, connectivity, and wallpaper
+tools share one consistent desktop surface. Pick the capabilities you want in
+Setup Manager, review what each choice changes, and keep the rest of macOS in
+charge of its own permissions and security settings.
 
-This repository is the curated public source release. It contains no machine-specific settings, account credentials, local history, external project checkouts, or generated app bundles. The default setup is a plan preview: building this source does not install or launch Mac++ or change macOS privacy or startup settings.
+## What you can do
 
-## Setup manager
+- **Search from your desktop.** Find apps, files, open windows, and built-in
+  actions without keeping a separate launcher open.
+- **Check the whole system in Nexus.** See live system and battery status,
+  storage, network controls, media, and desktop tools in one dashboard.
+- **Shape the desktop.** Switch color palettes, import ultrawide still images,
+  preview local videos, and choose a wallpaper. Still images are applied with
+  macOS directly. Without the separate wallpaper companion, a selected video
+  uses its poster frame as the desktop image.
+- **Arrange workspaces.** With optional yabai, drag a window to another space
+  for a one-time move. Secondary-click a window row to assign its app to a
+  workspace for future windows. Mac++ stores those rules locally for the
+  current user.
+- **Choose how far to configure.** Setup Manager describes Wi-Fi, Bluetooth,
+  location, notification settings, one-shot screen capture, audio
+  visualization, Accessibility, and yabai before you enable a capability.
 
-The Shell includes a setup manager for choosing a capability set and reviewing the resulting plan. It covers Wi-Fi scans, Bluetooth, location-aware features, native notification settings, one-shot screen capture, audio visualization, Accessibility actions, and yabai tiers.
+## Optional integrations and dependencies
 
-Notifications remain native macOS notifications. Mac++ does not read their contents or suppress banners. Each optional capability explains what is omitted when it is off and when macOS may ask for access. The advanced yabai scripting-addition tier explains its RecoveryOS and SIP tradeoff; the manager never changes SIP.
+| Integration | What it does | If it is not installed or enabled |
+| --- | --- | --- |
+| yabai | Reads spaces, moves windows, and applies app-to-space rules. | Mac++ keeps working with normal macOS window behavior. yabai is installed separately. |
+| blueutil | Adds nearby Bluetooth discovery and a paired-device fallback when available. | Native paired/recent-device and connection controls remain available; nearby discovery may be limited. |
+| Spotify | Offers optional media transport; account authorization is only used for queue features. | Other media sources and the rest of Mac++ continue to work. |
+| Discord | Recognizes the app in app and media surfaces. | No Discord-specific surface is shown. No bot, webhook, or account data is used. |
+| Wallpaper companion | Provides animated desktop playback when separately installed. | Stills switch natively; videos fall back to a still poster. The companion app is not part of this source release. |
+| Lock-screen wallpaper helper | Updates lock-screen wallpaper when separately installed. | Lock-screen changes are not included in this source release; the importer reports when the helper is unavailable. |
+| Homebrew | Nexus can show whether installed formulae and casks have updates. | Package status is omitted; Mac++ does not install or update packages. |
 
-## Optional app integrations
+Mac++ also uses macOS tools and frameworks already on the system. Weather and
+Wallhaven wallpaper search use their public network services when those
+features are opened. Mac++ has no telemetry service, bundled account
+credentials, or external project checkout in this release.
 
-Spotify media transport remains optional and works without account linking. Spotify queue access that requires account authorization is not included in this public profile. Discord is optionally recognized in the app and media surfaces; it does not require a bot, webhook, or bundled account data. Mac++ remains usable without either app.
+## Privacy and security
 
-## Build for review
+The dashboard uses a generic system icon; it does not display the local
+account name or search the user's photo/download folders for a profile image.
+The default setup is a reviewable plan. It does not install packages, load
+LaunchAgents, request privacy access, or change startup security. Notifications
+remain native macOS notifications: Mac++ does not read their contents, mirror
+them, or suppress banners.
+
+Current yabai releases can move windows between spaces while SIP stays enabled.
+Some additional yabai features use a scripting addition and require a manual
+partial security-policy change from RecoveryOS. That lowers protection for the
+privileged operations it enables. Mac++ never changes SIP or configures
+sudoers. Read the [public capability notes](docs/public-shell.md) before
+choosing an optional integration.
+
+## Build a review copy
 
 Requirements: macOS 14 or newer and Xcode Command Line Tools.
 
+Run the source-release checks:
+
 ```sh
-./bin/macpp-public-release-check
+./tests/run-public
+```
+
+Build a disposable, ad-hoc signed copy for review:
+
+```sh
 MACPP_PUBLIC_RELEASE=1 MACPP_CAELESTIA_PRODUCTION=1 MACPP_ALLOW_ADHOC=1 MACPP_CAELESTIA_SHELL_SIGNING_IDENTITY=- ./Source/MacPlusPlusCaelestiaShell/build.sh
 ```
 
-The build stages the app under `build/Mac++ Shell.app`. The commands above do not open the app, install it, load a LaunchAgent, grant permissions, or change startup security. Use a stable signing identity for a release that you intend to install later.
-
-See [the public profile and capability notes](docs/public-shell.md) before enabling optional integrations.
+The app is staged at `build/Mac++ Shell.app`; the build command does not open
+or install it. Ad-hoc signatures are for review only and are not suitable for
+retaining macOS privacy permissions across updates. A release intended for
+regular use needs a stable signing identity.

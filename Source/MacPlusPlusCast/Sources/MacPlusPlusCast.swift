@@ -2358,9 +2358,12 @@ private enum CalculatorEngine {
             hide()
             return
         case "native:wallpapers":
-            let app = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Applications/Mac++ Wallpaper.app", isDirectory: true)
-            if FileManager.default.fileExists(atPath: app.path) {
+            let apps = [
+                FileManager.default.homeDirectoryForCurrentUser
+                    .appendingPathComponent("Applications/Mac++ Wallpaper.app", isDirectory: true),
+                URL(fileURLWithPath: "/Applications/Mac++ Wallpaper.app", isDirectory: true)
+            ]
+            if let app = apps.first(where: { FileManager.default.fileExists(atPath: $0.path) }) {
                 let configuration = NSWorkspace.OpenConfiguration()
                 configuration.activates = true
                 NSWorkspace.shared.openApplication(at: app, configuration: configuration) { _, _ in
