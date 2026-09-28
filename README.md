@@ -10,6 +10,10 @@ The Shell includes a setup manager for choosing a capability set and reviewing t
 
 Notifications remain native macOS notifications. Mac++ does not read their contents or suppress banners. Each optional capability explains what is omitted when it is off and when macOS may ask for access. The advanced yabai scripting-addition tier explains its RecoveryOS and SIP tradeoff; the manager never changes SIP.
 
+## Optional app integrations
+
+Spotify media transport remains optional and works without account linking. Spotify queue access that requires account authorization is not included in this public profile. Discord is optionally recognized in the app and media surfaces; it does not require a bot, webhook, or bundled account data. Mac++ remains usable without either app.
+
 ## Build for review
 
 Requirements: macOS 14 or newer and Xcode Command Line Tools.

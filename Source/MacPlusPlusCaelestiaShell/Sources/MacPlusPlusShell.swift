@@ -4384,7 +4384,7 @@ private struct AppRailApplication: Identifiable, Equatable, Sendable {
         let identity = "\(bundleIdentifier) \(name)".lowercased()
         return [
             "safari", "google chrome", "arc", "firefox", "brave",
-            "microsoft edge", "orion", "ghostty", "iterm", "terminal"
+            "microsoft edge", "orion", "terminal"
         ].contains { identity.contains($0) }
     }
 }
@@ -4404,18 +4404,6 @@ private func appRailOwnerApplication(for application: NSRunningApplication) -> N
     return NSWorkspace.shared.runningApplications.first {
         $0.bundleIdentifier?.caseInsensitiveCompare("com.valvesoftware.steam") == .orderedSame
     } ?? application
-}
-
-private func appRailIsManagedSurface(appName: String, title: String) -> Bool {
-    guard appName.caseInsensitiveCompare("Ghostty") == .orderedSame else { return false }
-    // The Work cockpit is still a real Ghostty application window and should
-    // occupy one dock slot. Only the decorative/diagnostic surfaces are
-    // internal: they are not useful dock destinations and can change titles
-    // between `btop`, `stats`, and `asitop` depending on the saved monitor.
-    let managedTitles = [
-        "btop", "cmatrix", "stats", "asitop"
-    ]
-    return managedTitles.contains { title.caseInsensitiveCompare($0) == .orderedSame }
 }
 
 /// The app rail is a dock for user-facing windowed applications, not a second
@@ -4615,64 +4603,25 @@ private final class WeatherLocationProvider: NSObject, CLLocationManagerDelegate
 
 private func workspacePopoverHeight(windowCount: Int) -> CGFloat {
     // The header badge counts unique apps, but the preview rows represent
-    // individual windows. MacPlusPlus Drop can therefore share Ghostty with the
-                // normal Space 3 terminal: one app, two rows. Size from the same bounded
-                // row count the view renders so the AppKit panel cannot clip the second
-                // window or leave a mismatched blank band.
+    // individual windows. Size from the same bounded row count the view
+    // renders so the AppKit panel cannot clip a window or leave a blank band.
     let visibleRowCount = max(1, min(4, windowCount))
     return 75 + leftPopoverVerticalInset * 2
         + CGFloat(visibleRowCount - 1) * 36
 }
 
-/// Keep useful audio/controller devices near the top while preserving every
-/// device in the compact list. The priority only affects ties after connection
-/// state; it must never filter the list down to a hand-picked set of names.
-private func bluetoothDevicePriority(_ item: BluetoothDeviceInfo) -> Int {
-    let name = item.name.lowercased()
-    if name.contains("airpods") || name.contains("xm") || name.contains("wh-") ||
-        name.contains("headphone") || name.contains("headset") || name.contains("buds") ||
-        name.contains("beats") { return 0 }
-    if name.contains("controller") || name.contains("dualsense") || name.contains("gamepad") ||
-        name.contains("playstation") || name.contains("xbox") { return 1 }
-    return 2
-}
-
-/// Keep recognizable device names intact while removing vendor verbosity from
-/// narrow rail rows. The full name remains available in System Settings; these
-/// compact cards need a stable label that does not collide with their action pill.
 private func compactAudioDeviceName(_ rawName: String) -> String {
-    let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
-    let lower = name.lowercased()
-    if lower == "dualsense wireless controller" || lower.contains("dualsense wireless controller") {
-        return "DualSense Controller"
-    }
-    if lower.contains("airpods") {
-        return lower.contains("4") ? "AirPods 4" : "AirPods"
-    }
-    if lower.contains("usb audio") {
-        return "USB Audio"
-    }
-    if lower == "macbook microphone" {
-        return "MacBook Mic"
-    }
-    if lower == "macbook speakers" {
-        return "MacBook"
-    }
-    return name
+    rawName.trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
-/// The devices the rail Bluetooth popout actually renders. Keep the complete
-/// inventory here; the view supplies a bounded scroll viewport rather than
-/// dropping the tail. This matters for a paired headset that is alphabetically
-/// behind several controllers/phones.
+/// The complete paired and nearby device inventory is sorted by connection
+/// state and name. The view uses a bounded scroll viewport without dropping
+/// devices from the list.
 private func railBluetoothDevices(from devices: [BluetoothDeviceInfo]) -> [BluetoothDeviceInfo] {
     devices.sorted { lhs, rhs in
         if lhs.connected != rhs.connected { return lhs.connected && !rhs.connected }
         if lhs.nearby != rhs.nearby { return lhs.nearby && !rhs.nearby }
         if lhs.paired != rhs.paired { return lhs.paired && !rhs.paired }
-        let leftPriority = bluetoothDevicePriority(lhs)
-        let rightPriority = bluetoothDevicePriority(rhs)
-        if leftPriority != rightPriority { return leftPriority < rightPriority }
         return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
     }
 }
@@ -5190,7 +5139,7 @@ private struct LocalProcessSample: Codable, Sendable {
 /// A foreground application is rarely one process on macOS. Electron and
 /// WebKit apps put their renderer, GPU, network, and service processes beside
 /// the app process, so a single PID makes the active-app card look falsely
-/// quiet (ChatGPT is a particularly visible example). Keep this sampler local
+/// quiet. This sampler stays local
 /// to the card: it is only started while the card/dashboard is visible and
 /// reads one compact `ps` table per second.
 private struct MacPlusPlusProcessResourceRow {
@@ -8168,8 +8117,7 @@ private struct SurfaceSnapshot: Sendable {
     /// The app rail is deliberately narrower than the workspace inventory:
     /// it accepts standard, AX-backed windows plus a tightly-scoped fallback
     /// for real root windows from apps such as Steam whose helper process does
-    /// not publish AX role metadata. Mac++'s own Ghostty monitor surfaces are
-    /// still excluded before they reach the icon list.
+    /// not publish AX role metadata.
     static func appRailWindowSnapshot() -> [AppRailWindowSnapshot] {
         guard let windows = yabaiJSONArray(["-m", "query", "--windows"], context: "app-rail-windows") else {
             return []
@@ -8207,11 +8155,7 @@ private struct SurfaceSnapshot: Sendable {
                   let id = (window["id"] as? NSNumber)?.intValue,
                   let pid = (window["pid"] as? NSNumber)?.int32Value,
                   let appName = window["app"] as? String,
-                  !appName.isEmpty,
-                  !appRailIsManagedSurface(
-                    appName: appName,
-                    title: title
-                  ) else { return nil }
+                  !appName.isEmpty else { return nil }
             return AppRailWindowSnapshot(
                 id: id,
                 pid: pid,
@@ -14368,9 +14312,8 @@ private struct MacPlusPlusNexusConfiguration: Codable, Equatable {
 }
 
 /// A deliberately small, value-typed row for Observatory.  It is populated
-/// from read-only process checks and the tactile helper's RAM state file; a
-/// failed helper is shown as a red/quiet row rather than being restarted by
-/// the dashboard.
+/// from read-only process checks. Failed services remain visible without
+/// being restarted by the dashboard.
 private struct MacPlusPlusObservatoryRuntimeRow: Identifiable, Equatable, Sendable {
     let id: String
     let title: String
@@ -14480,15 +14423,6 @@ private struct MacPlusPlusScreenTimeSnapshot: Codable, Sendable {
 }
 
 @MainActor private final class MacPlusPlusNexusModel: ObservableObject {
-    // These mirror Mac++ Tactile's bounded digital guardrails. They are signal
-    // limits only; the amplifier's gain, load, mounting, and temperature still
-    // determine the real hardware safety envelope.
-    private static let tactileMinimumAmplitude = 0.05
-    private static let tactileDefaultSoftwareCeiling = 0.60
-    private static let tactileDefaultSplitFrequency = 60.0
-    private static let tactileMinimumSplitFrequency = 20.0
-    private static let tactileMaximumSplitFrequency = 200.0
-
     /// The ten bands are an octave apart and each peaking filter runs at Q=1,
     /// so every one is about 1.4 octaves wide and neighbours overlap heavily.
     /// Their boosts therefore compound: the resulting curve looks very little
@@ -14501,9 +14435,8 @@ private struct MacPlusPlusScreenTimeSnapshot: Codable, Sendable {
     /// its intended curve across 20 Hz-20 kHz.
     enum EQPreset: String, CaseIterable, Identifiable {
         case flat, warm, clarity, bass, hardcore, vocals, night
-        case tactileSplit = "tactile-split"
         var id: String { rawValue }
-        var title: String { self == .tactileSplit ? "TACTILE FLAT" : rawValue.uppercased() }
+        var title: String { rawValue.uppercased() }
         var gains: [Double] {
             MacPlusPlusPureLogic.eqPresetGains(named: rawValue)
                 ?? Array(repeating: 0, count: 10)
@@ -14613,15 +14546,6 @@ private struct MacPlusPlusScreenTimeSnapshot: Codable, Sendable {
     @Published var metricsHistoryStatus = "COLLECTING"
     @Published var screenTimeEntries: [MacPlusPlusScreenTimeEntry] = []
     @Published var screenTimeStatus = "COLLECTING"
-    @Published var tactileMode = "bass-notifications"
-    @Published var tactileEnabled = false
-    @Published var tactileSplitFrequency = MacPlusPlusNexusModel.tactileDefaultSplitFrequency
-    @Published var tactileOutput = "SIMULATION"
-    @Published var tactileAudioAge = "—"
-    @Published var tactileDeviceUID = ""
-    @Published var tactileMaxAmplitude = MacPlusPlusNexusModel.tactileDefaultSoftwareCeiling
-    @Published var tactileSoftwareCeiling = MacPlusPlusNexusModel.tactileDefaultSoftwareCeiling
-    @Published var tactileCurrentAmplitude = 0.0
     @Published var desktopLayerEnabled = false
     @Published var desktopCenterClockEnabled = false
     @Published var desktopVisualizerEnabled = true
@@ -14661,12 +14585,6 @@ private struct MacPlusPlusScreenTimeSnapshot: Codable, Sendable {
     // `refreshAudio` for why this is kept instead of starting each refresh
     // from an empty list.
     private var lastKnownAirPlayRoutes: [SystemOutputAudio.Device] = []
-    private let tactileEvents = MacPlusPlusTactileEventClient.shared
-
-    private var tactileRouteActive: Bool {
-        tactileEnabled && tactileMode != "off"
-    }
-
     private static var configurationURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/MacPlusPlus", isDirectory: true)
@@ -14714,7 +14632,6 @@ private struct MacPlusPlusScreenTimeSnapshot: Codable, Sendable {
         }
         loadEQ()
         loadScreenTimeSnapshot()
-        refreshTactile()
         refreshAudio()
         refreshDesktopLayer()
     }
@@ -14829,45 +14746,8 @@ private struct MacPlusPlusScreenTimeSnapshot: Codable, Sendable {
         applyDesktopLayerSettings()
     }
 
-    func refreshTactile() {
-tactileEnabled = false
-        tactileMode = "off"
-        tactileSplitFrequency = MacPlusPlusNexusModel.tactileDefaultSplitFrequency
-        tactileOutput = "UNAVAILABLE"
-        tactileAudioAge = "—"
-        tactileDeviceUID = ""
-        tactileMaxAmplitude = Self.tactileDefaultSoftwareCeiling
-        tactileSoftwareCeiling = Self.tactileDefaultSoftwareCeiling
-        tactileCurrentAmplitude = 0
-    }
-
-    func setTactileMode(_ mode: String) {
-_ = mode
-        refreshTactile()
-    }
-
-    func setTactileEnabled(_ enabled: Bool) {
-_ = enabled
-        refreshTactile()
-    }
-
-    func setTactileDevice(_ device: SystemOutputAudio.Device?) {
-_ = device
-        tactileDeviceUID = ""
-    }
-
-    func setTactileMaxAmplitude(_ amplitude: Double) {
-_ = amplitude
-        tactileMaxAmplitude = Self.tactileDefaultSoftwareCeiling
-    }
-
-    func pulseTactile(kind: String = "shell", intensity: Double = 0.85) {
-_ = kind
-        _ = intensity
-    }
-
     func selectOutputDevice(_ device: SystemOutputAudio.Device) {
-        let resumeEQ = eqEnabled || tactileRouteActive
+        let resumeEQ = eqEnabled
         if resumeEQ { writeEQControl(enabled: false) }
 
         // Selecting an AirPlay child may need to wake Sound Settings and walk
@@ -14942,10 +14822,6 @@ _ = kind
         selectInputDevice(next)
     }
 
-    func cycleTactileDevice() {
-
-    }
-
     func setOutputBalance(_ value: Double) {
         outputBalance = min(1, max(0, value))
         if !SystemOutputAudio.writeBalance(outputBalance) {
@@ -14991,10 +14867,6 @@ _ = preset
         telemetryPage == .overview || telemetryPage == .observatory
     }
 
-    private var telemetryPageNeedsTactileData: Bool {
-        telemetryPage == .audio
-    }
-
     func setPage(_ page: Page) {
         let changed = telemetryPage != page
         telemetryPage = page
@@ -15021,13 +14893,11 @@ _ = preset
     /// and LaunchAgent probes while the user was reading Audio, Tools, or
     /// Settings, which made page transitions compete with SwiftUI layout.
     private func startLiveUpdates() {
-        guard nexusVisible,
-              telemetryPageNeedsDashboardData || telemetryPageNeedsTactileData else { return }
+        guard nexusVisible, telemetryPageNeedsDashboardData else { return }
         if telemetryPageNeedsDashboardData {
             refreshTelemetry()
             refreshRuntime()
         }
-        if telemetryPageNeedsTactileData { refreshTactile() }
         telemetryTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.nexusVisible else { return }
@@ -15035,7 +14905,6 @@ _ = preset
                     self.refreshTelemetry()
                     self.refreshRuntime()
                 }
-                if self.telemetryPageNeedsTactileData { self.refreshTactile() }
             }
         }
         telemetryTimer?.tolerance = 0.25
@@ -19851,9 +19720,6 @@ private struct MacPlusPlusNexusView: View {
     @State private var wallpaperDiscoveryExpanded = false
     @State private var wallpaperCropResult: MacPlusPlusWallpaperSourceResult?
     @State private var wallpaperCropSelection = MacPlusPlusWallpaperCropSelection()
-    @State private var tactileDraftMaxAmplitude = 0.60
-    @State private var tactilePendingMaxAmplitude: Double?
-    @State private var tactileHighWarningPresented = false
     @State private var softLockResetConfirmationPresented = false
     @State private var navigationSearch = ""
     @State private var wallpaperFramingRevision = 0
@@ -21829,43 +21695,6 @@ private struct MacPlusPlusNexusView: View {
         .animation(ShellMotion.valueChange.animation, value: value)
     }
 
-    private func tactileModeButton(_ title: String, mode: String) -> some View {
-        let selected = nexus.tactileMode == mode
-        return Button {
-            withAnimation(ShellMotion.contentIn.animation) { nexus.setTactileMode(mode) }
-        } label: {
-            Text(title)
-                .font(.system(size: ShellTypography.nano, weight: .semibold, design: .rounded))
-                .lineLimit(1)
-                .minimumScaleFactor(0.72)
-                .frame(maxWidth: .infinity)
-                .frame(height: 34)
-                .contentShape(Capsule())
-        }
-        .buttonStyle(MicroButtonStyle())
-        .foregroundStyle(selected ? Theme.surface : Theme.bright)
-        .background(selected ? Theme.accent : Theme.tile, in: Capsule())
-    }
-
-    private func tactileActionButton(_ title: String, symbol: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: Spacing.tight) {
-                Image(systemName: symbol)
-                    .font(.system(size: ShellIcon.small, weight: .bold, design: .rounded))
-                Text(title)
-                    .font(.system(size: ShellTypography.nano, weight: .semibold, design: .rounded))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.72)
-            }
-            .frame(maxWidth: .infinity)
-            .frame(height: 34)
-            .contentShape(Capsule())
-        }
-        .buttonStyle(MicroButtonStyle())
-        .foregroundStyle(Theme.bright)
-        .background(Theme.tile, in: Capsule())
-    }
-
     // Scrolls, like overview/capture/settings already do. This page stacks to
     // roughly 420pt (routing card, output route, input route, EQ header,
     // presets, and the 94pt band strip) against a 364pt viewport, and the
@@ -22174,155 +22003,12 @@ private struct MacPlusPlusNexusView: View {
         return String(format: "%.1f KHZ", device.sampleRate / 1000)
     }
 
-    private var tactileRouteLabel: String {
-        guard !nexus.tactileDeviceUID.isEmpty,
-              let device = nexus.outputDevices.first(where: { $0.uid == nexus.tactileDeviceUID }) else {
-            return "DEFAULT"
-        }
-        return compactAudioDeviceName(device.name)
-    }
-
     private var balanceLabel: String {
         guard nexus.balanceAvailable else { return "N/A" }
         if abs(nexus.outputBalance - 0.5) < 0.015 { return "CENTER" }
         return nexus.outputBalance < 0.5
             ? "L \(Int((0.5 - nexus.outputBalance) * 200))"
             : "R \(Int((nexus.outputBalance - 0.5) * 200))"
-    }
-
-    /// Tactile output belongs with the audio route and EQ controls. Keeping it
-    /// here leaves Observatory glanceable while preserving the same isolated
-    /// profile, route, and test-pulse controls for users who actually need
-    /// the transducer.
-    private var tactileOutputCard: some View {
-        VStack(alignment: .leading, spacing: Spacing.base) {
-            HStack {
-                VStack(alignment: .leading, spacing: Spacing.hairline) {
-                    Text("TACTILE OUTPUT").nexusLabel()
-                    Text(nexus.tactileEnabled
-                         ? nexus.tactileMode.uppercased() + "  •  " + nexus.tactileOutput
-                         : "PROFILE ARMED, OUTPUT OFF")
-                        .nexusValue()
-                        .lineLimit(1)
-                }
-                Spacer()
-                Toggle("", isOn: Binding(
-                    get: { nexus.tactileEnabled },
-                    set: { nexus.setTactileEnabled($0) }
-                ))
-                .toggleStyle(ShellSwitchToggleStyle())
-                .labelsHidden()
-            }
-
-            HStack(spacing: Spacing.snug) {
-                Image(systemName: "hifispeaker.2.fill")
-                    .font(.system(size: ShellIcon.small, weight: .semibold, design: .rounded))
-                    .foregroundStyle(Theme.accent)
-                Text("ROUTE").nexusLabel()
-                Button {
-                    nexus.cycleTactileDevice()
-                } label: {
-                    HStack(spacing: Spacing.tight) {
-                        Text(tactileRouteLabel)
-                            .font(.system(size: ShellTypography.nano, weight: .semibold, design: .rounded))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.72)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                            .font(.system(size: ShellIcon.small, weight: .bold, design: .rounded))
-                            .foregroundStyle(Theme.muted)
-                    }
-                    .foregroundStyle(nexus.tactileDeviceUID.isEmpty ? Theme.bright : Theme.accent)
-                    .padding(.horizontal, Spacing.base)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .frame(height: 28)
-                    .background(nexus.tactileDeviceUID.isEmpty ? Theme.tile : Theme.accent.opacity(0.18), in: Capsule())
-                }
-                .buttonStyle(MicroButtonStyle())
-                .disabled(nexus.outputDevices.filter { !$0.isAirPlayRoute }.isEmpty)
-                .help("Click to cycle the tactile output route")
-            }
-
-            HStack(spacing: Spacing.snug) {
-                tactileModeButton("Bass + notifs", mode: "bass-notifications")
-                tactileModeButton("Notifs", mode: "notifications-only")
-                tactileModeButton("Game impact", mode: "game-impact")
-            }
-            HStack(spacing: Spacing.snug) {
-                tactileModeButton("Shell", mode: "shell-feedback")
-                tactileModeButton("Off", mode: "off")
-                tactileActionButton("Pulse test", symbol: "waveform") {
-                    nexus.pulseTactile(kind: "shell", intensity: 0.9)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: Spacing.tight) {
-                HStack(spacing: Spacing.snug) {
-                    Image(systemName: "waveform.path.ecg")
-                        .font(.system(size: ShellIcon.small, weight: .semibold, design: .rounded))
-                        .foregroundStyle(Theme.accent)
-                    Text("MAX AMPLITUDE").nexusLabel()
-                    Spacer(minLength: 4)
-                    Text(String(format: "%.0f%%", tactileDraftMaxAmplitude * 100))
-                        .nexusValue()
-                }
-                Slider(
-                    value: Binding(
-                        get: { tactileDraftMaxAmplitude },
-                        set: { tactileDraftMaxAmplitude = $0 }
-                    ),
-                    in: 0.05...tactileAmplitudeCeiling,
-                    step: 0.01,
-                    onEditingChanged: { editing in
-                        if !editing { commitTactileMaxAmplitude() }
-                    }
-                )
-                .tint(Theme.accent)
-                Text(String(format: "LIVE %.0f%%", nexus.tactileCurrentAmplitude * 100))
-                    .font(.system(size: ShellTypography.nano, weight: .medium, design: .rounded))
-                    .foregroundStyle(Theme.muted)
-                    .lineLimit(1)
-            }
-            .padding(.top, Spacing.hairline)
-        }
-        .padding(Spacing.roomy)
-        .nexusLayer(cornerRadius: Rounding.large, depth: .group)
-        .onAppear {
-            tactileDraftMaxAmplitude = nexus.tactileMaxAmplitude
-        }
-        .onChange(of: nexus.tactileMaxAmplitude) { _, value in
-            guard tactilePendingMaxAmplitude == nil else { return }
-            tactileDraftMaxAmplitude = value
-        }
-        .alert("HIGH TACTILE OUTPUT", isPresented: $tactileHighWarningPresented) {
-            Button("Apply") {
-                guard let pending = tactilePendingMaxAmplitude else { return }
-                tactilePendingMaxAmplitude = nil
-                tactileDraftMaxAmplitude = pending
-                nexus.setTactileMaxAmplitude(pending)
-            }
-            Button("Cancel", role: .cancel) {
-                tactilePendingMaxAmplitude = nil
-                tactileDraftMaxAmplitude = nexus.tactileMaxAmplitude
-            }
-        } message: {
-            Text("High output may damage connected hardware.")
-        }
-    }
-
-    private var tactileAmplitudeCeiling: Double {
-        max(0.05, nexus.tactileSoftwareCeiling)
-    }
-
-    private func commitTactileMaxAmplitude() {
-        let value = min(tactileAmplitudeCeiling, max(0.05, tactileDraftMaxAmplitude))
-        tactileDraftMaxAmplitude = value
-        if value > 0.50 {
-            tactilePendingMaxAmplitude = value
-            tactileHighWarningPresented = true
-        } else {
-            nexus.setTactileMaxAmplitude(value)
-        }
     }
 
     private var eqFrequencies: [String] { ["31", "62", "125", "250", "500", "1K", "2K", "4K", "8K", "16K"] }
@@ -26176,7 +25862,7 @@ private struct DrawerView: View {
     private var shortcutsContent: some View {
         VStack(spacing: Spacing.base) {
             shortcut("Search", "command") { model.open("MacPlusPlusCast"); close() }
-            shortcut("Ghostty", "terminal") { model.open("Ghostty"); close() }
+            shortcut("Terminal", "terminal") { model.open("Terminal"); close() }
             shortcut("Safari", "safari") { model.open("Safari"); close() }
         }
     }
@@ -29846,7 +29532,6 @@ private func macppShellScrollEventTapCallback(
     var capsLockGlobalMonitor: Any?
     var capsLockLocalMonitor: Any?
     var capsLockState: Bool?
-    let tactileEvents = MacPlusPlusTactileEventClient.shared
     /// Set when a popover was opened by an explicit click rather than hover.
     /// Pointer-out auto-close is suppressed while this holds, so a deliberate
     /// press cannot be undone by drifting off the trigger. See
@@ -31065,12 +30750,6 @@ private func macppShellScrollEventTapCallback(
         let commonApplications = [
             "App Store": "com.apple.AppStore",
             "Calendar": "com.apple.iCal",
-            "ChatGPT": "com.openai.chat",
-            "ChatGPT Helper": "com.openai.chat",
-            "Claude": "com.anthropic.claudefordesktop",
-            "Claude Desktop": "com.anthropic.claudefordesktop",
-            "Claude for Desktop": "com.anthropic.claudefordesktop",
-            "Codex": "com.openai.codex",
             "Discord": "com.hnc.discord",
             "Discord Helper": "com.hnc.discord",
             "Discord Canary": "com.hnc.discord",
@@ -31203,10 +30882,6 @@ private func macppShellScrollEventTapCallback(
         // notification state. If the pointer is already over the surface,
         // its hover still explicitly owns the recent-stack preview.
         notificationMockupSurface?.previewExpanded = notificationPanelHovered
-        // Notification text never crosses into the tactile path; only the
-        // event class does. This keeps the haptic bridge useful without
-        // leaking message contents to another process.
-        tactileEvents.send(kind: "notification", intensity: event.source == "notificationcenter-ax" ? 0.72 : 0.88)
         if let locked = currentNotificationSessionLockState() {
             notificationSessionLocked = locked
         }
@@ -35305,8 +34980,8 @@ private func macppShellScrollEventTapCallback(
            ProcessInfo.processInfo.environment["MACPP_SHELL_PREVIEW_NO_BLUETOOTH"] != "1" {
             model.refreshBluetoothDevices()
             // A device that is mid-negotiation right as the panel opens --
-            // AirPods finishing their own reconnect on wake, a controller
-            // still pairing -- reads back as disconnected on this first
+            // for example, an audio device reconnecting or another device
+            // pairing -- reads back as disconnected on this first
             // query and only settles a moment later, same as the toggle
             // case `bluetoothSettleSchedule` exists for below. One quiet
             // reconcile shortly after catches that without the popout

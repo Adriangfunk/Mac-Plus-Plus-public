@@ -323,8 +323,8 @@ private struct StandalonePaletteValues {
 
 /// Standalone Search is used after the Work shell is intentionally stopped.
 /// Keep its surface on the same palette contract as the shell instead of
-/// falling back to a second fixed blue theme.  Game and Performance are
-/// deliberately red so the control surface agrees with their red HID profile.
+/// falling back to a second fixed blue theme. Game and Performance use the
+/// configured palette for each mode.
 private enum StandalonePaletteStore {
     private static var nonworkMode: String?
 
@@ -1819,15 +1819,10 @@ private enum CalculatorEngine {
             }
         }
         if trimmed.isEmpty {
-            let preferred = ["Safari", "Ghostty", "ChatGPT", "Codex", "Discord", "Finder", "System Settings"]
-            let fallbackOrder = Dictionary(uniqueKeysWithValues: preferred.enumerated().map { ($0.element.lowercased(), $0.offset) })
             var visible = baseItems.sorted { lhs, rhs in
                 let leftUses = commandUsage(lhs.id)
                 let rightUses = commandUsage(rhs.id)
                 if leftUses != rightUses { return leftUses > rightUses }
-                let leftFallback = fallbackOrder[lhs.title.lowercased()] ?? Int.max
-                let rightFallback = fallbackOrder[rhs.title.lowercased()] ?? Int.max
-                if leftFallback != rightFallback { return leftFallback < rightFallback }
                 if lhs.kind != rhs.kind { return lhs.kind == .app }
                 return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
             }
@@ -3114,17 +3109,9 @@ private enum CalculatorEngine {
                     let detail = launchError?.localizedDescription
                         ?? processOutput.split(separator: "\n").last.map(String.init)
                         ?? "EXIT \(process.terminationStatus)"
-                    // The mode state file, not this exit code, is the source
-                    // of truth refreshMode() reads. restore-work-macpp/game-
-                    // mode/performance-mode each run many sub-steps (codex,
-                    // workspace repair, wallpaper, ...) after the actual mode
-                    // boundary has already flipped, so a late failure in any
-                    // one of them left this script's own palette/status stuck
-                    // on whatever mode it was showing before the run -- Game's
-                    // red theme surviving a return to Work that had, in every
-                    // way that mattered, already happened. Always reconcile
-                    // against the real state on disk; it is cheap and a no-op
-                    // when nothing actually changed.
+                    // The persisted mode state remains authoritative if a
+                    // transition completes before all follow-up actions report
+                    // success. Reconcile before publishing the final status.
                     self.refreshMode()
                     // Publish the actionable failure after reconciliation so
                     // it remains on screen instead of flashing back to READY.
@@ -3288,11 +3275,9 @@ private enum CalculatorEngine {
         switch searchKey(name) {
         case "spotify": return ["music", "player", "media", "audio"]
         case "safari": return ["browser", "web", "internet"]
-        case "ghostty": return ["terminal", "shell", "console"]
         case "discord": return ["chat", "voice", "community"]
         case "finder": return ["files", "documents"]
         case "system settings": return ["settings", "preferences", "system"]
-        case "chatgpt", "codex": return ["ai", "assistant"]
         default: return []
         }
     }

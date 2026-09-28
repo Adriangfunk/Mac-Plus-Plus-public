@@ -35,6 +35,10 @@ The included yabai rules are opt-in and do not install or launch yabai:
 source "${MACPP_ROOT:?Set MACPP_ROOT to the repository path}/config/yabai/macpp-shell.yabairc"
 ```
 
+## Optional app integrations
+
+Spotify transport controls and Discord app/media recognition are optional and are not prerequisites for using the Shell. The public source does not include Spotify account authorization or authenticated queue access, and it contains no Spotify or Discord credentials.
+
 ## Review build
 
 Run the static release checks:

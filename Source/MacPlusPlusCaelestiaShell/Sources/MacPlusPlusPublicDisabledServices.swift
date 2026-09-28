@@ -1,12 +1,5 @@
 import AppKit
 
-/// Public builds do not connect to a tactile helper or emit device events.
-final class MacPlusPlusTactileEventClient {
-    static let shared = MacPlusPlusTactileEventClient()
-    func send(kind: String, intensity: Double = 1.0, duration: Double = 0.18) {}
-    func setMode(_ mode: String) {}
-}
-
 enum MacPlusPlusClipboardEntryKind {
     case text
     case image

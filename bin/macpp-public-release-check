@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ALLOWED_ROOT = {".gitattributes", ".gitignore", "README.md", "Source", "apps", "bin", "config", "docs", "tests"}
 EXTERNAL_COMPONENTS = {"drift", "vendor", "third_party", "third-party", "external", "external-repos", "submodules"}
 FORBIDDEN_SUFFIXES = {".app", ".dylib", ".so", ".sqlite", ".db", ".bin", ".mobileprovision", ".p12", ".pfx", ".pem", ".key"}
+FORBIDDEN_PERSONAL_INTEGRATIONS = ("drunk" + "deer", "ra" + "zer", "ghost" + "ty", "tac" + "tile", "chat" + "gpt", "clau" + "de", "co" + "dex")
 
 # These patterns identify account-specific data without embedding any account
 # name or secret value in the checker itself.
@@ -71,6 +72,9 @@ def check_tree(files: list[Path]) -> None:
         for pattern in PRIVATE_PATTERNS:
             if pattern.search(content):
                 fail(f"account-specific or credential-like data found in {relative}")
+        folded = content.casefold()
+        if any(marker in folded for marker in FORBIDDEN_PERSONAL_INTEGRATIONS):
+            fail(f"user-specific device or app integration found in {relative}")
 
 
 def load_json(relative: str):
@@ -185,7 +189,6 @@ def main() -> int:
     )
     disabled_services = require_contains(
         "Source/MacPlusPlusCaelestiaShell/Sources/MacPlusPlusPublicDisabledServices.swift",
-        "do not connect to a tactile helper",
         "makeDefault() -> MacPlusPlusClipboardHistoryController? { nil }",
     )
     if "NotificationSocketClient" in disabled_services or "NotificationBannerSuppressor" in disabled_services:

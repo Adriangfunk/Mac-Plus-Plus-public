@@ -117,11 +117,6 @@ enum MacPlusPlusPureLogic {
             helperPrefixes: []
         ),
         MediaProfile(
-            applicationAliases: ["chatgpt"],
-            ownerAliases: ["chatgpt", "comopenaichat", "comopenaiatlas"],
-            helperPrefixes: ["chatgpthelper"]
-        ),
-        MediaProfile(
             applicationAliases: ["vlc"],
             ownerAliases: ["vlc", "orgvideolanvlc"],
             helperPrefixes: []
@@ -193,7 +188,7 @@ enum MacPlusPlusPureLogic {
 
     // MARK: EQ preset data
 
-    static let eqPresetNames = ["flat", "warm", "clarity", "bass", "hardcore", "vocals", "night", "tactile-split"]
+    static let eqPresetNames = ["flat", "warm", "clarity", "bass", "hardcore", "vocals", "night"]
 
     /// The shell UI calls this table directly when applying a preset.  Tests
     /// therefore validate the values that are actually sent to Mac++ EQ.
@@ -206,7 +201,6 @@ enum MacPlusPlusPureLogic {
         case "hardcore": return [0.8, 5.9, 2.3, -2.0, -3.4, -1.5, 0.7, 3.6, 0.2, -1.0]
         case "vocals": return [-4.4, -2.1, 0.1, 3.0, -3.6, -1.4, 2.4, 4.6, 0.8, -0.9]
         case "night": return [-4.9, -3.1, -1.0, 0.3, 0.5, 1.4, 1.6, 0.2, -0.8, -2.9]
-        case "tactile-split": return [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
         default: return nil
         }
     }
